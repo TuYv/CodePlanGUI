@@ -1,8 +1,18 @@
 package com.github.codeplangui.model
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
-enum class MessageRole { SYSTEM, USER, ASSISTANT }
+enum class MessageRole {
+    @SerialName("system")
+    SYSTEM,
+
+    @SerialName("user")
+    USER,
+
+    @SerialName("assistant")
+    ASSISTANT
+}
 
 @Serializable
 data class Message(

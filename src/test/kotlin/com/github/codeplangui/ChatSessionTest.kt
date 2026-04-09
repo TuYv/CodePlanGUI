@@ -36,6 +36,8 @@ class ChatSessionTest {
         // system + last 40 of the 50 non-system
         assertEquals(41, msgs.size)
         assertEquals(MessageRole.SYSTEM, msgs[0].role)
+        assertEquals("user 10", msgs[1].content)
+        assertEquals("reply 24", msgs.last().content)
     }
 
     @Test

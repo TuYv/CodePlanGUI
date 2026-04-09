@@ -1,9 +1,8 @@
 <idea-plugin>
     <id>com.github.codeplangui</id>
     <name>CodePlanGUI</name>
-    <version>0.1.0</version>
     <vendor>codeplangui</vendor>
-    <description>Custom API AI assistant with Chat and Commit Message generation</description>
+    <description>Scaffold for the CodePlanGUI IntelliJ plugin.</description>
 
     <depends>com.intellij.modules.platform</depends>
     <depends>Git4Idea</depends>

@@ -33,20 +33,19 @@ sealed class TestResult {
     data class Failure(val message: String) : TestResult()
 }
 
-class OkHttpSseClient {
-
-    private val json = Json { ignoreUnknownKeys = true }
-
-    private val streamClient = OkHttpClient.Builder()
+class OkHttpSseClient(
+    private val streamClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(10, TimeUnit.SECONDS)
-        .build()
-
-    private val syncClient = OkHttpClient.Builder()
+        .build(),
+    private val syncClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
-        .build()
+        .build(),
+    private val json: Json = Json { ignoreUnknownKeys = true },
+    private val eventSourceFactory: EventSource.Factory = EventSources.createFactory(streamClient)
+) {
 
     fun buildRequest(
         config: ProviderConfig,
@@ -95,18 +94,19 @@ class OkHttpSseClient {
                 onError(msg)
             }
         }
-        return EventSources.createFactory(streamClient).newEventSource(request, listener)
+        return eventSourceFactory.newEventSource(request, listener)
     }
 
     fun callSync(request: Request): Result<String> {
         return try {
-            val response = syncClient.newCall(request).execute()
-            if (!response.isSuccessful) {
-                Result.failure(Exception(buildErrorMessage(response, null)))
-            } else {
-                val body = response.body?.string() ?: ""
-                val content = extractSyncContent(body)
-                Result.success(content)
+            syncClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Result.failure(Exception(buildErrorMessage(response, null)))
+                } else {
+                    val body = response.body?.string() ?: ""
+                    val content = extractSyncContent(body)
+                    Result.success(content)
+                }
             }
         } catch (e: Exception) {
             Result.failure(e)
@@ -117,9 +117,10 @@ class OkHttpSseClient {
         val testMessages = listOf(Message(MessageRole.USER, "hi"))
         val request = buildRequest(config, apiKey, testMessages, 0.0, 1, false)
         return try {
-            val response = syncClient.newCall(request).execute()
-            if (response.isSuccessful) TestResult.Success
-            else TestResult.Failure("HTTP ${response.code}: ${response.body?.string()?.take(200)}")
+            syncClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) TestResult.Success
+                else TestResult.Failure("HTTP ${response.code}: ${response.body?.string()?.take(200)}")
+            }
         } catch (e: java.net.SocketTimeoutException) {
             TestResult.Failure("连接超时（5s）：请检查 endpoint 是否可访问")
         } catch (e: java.net.ConnectException) {

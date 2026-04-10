@@ -48,6 +48,20 @@ test {
     useJUnitPlatform()
 }
 
+tasks.register('buildWebview', Exec) {
+    workingDir 'webview'
+    commandLine 'npm', 'run', 'build'
+    inputs.dir('webview/src')
+    inputs.file('webview/package.json')
+    inputs.file('webview/package-lock.json')
+    inputs.file('webview/vite.config.ts')
+    outputs.file('src/main/resources/webview/index.html')
+}
+
+tasks.named('processResources').configure {
+    dependsOn 'buildWebview'
+}
+
 intellijPlatform {
     pluginConfiguration {
         name = 'CodePlanGUI'

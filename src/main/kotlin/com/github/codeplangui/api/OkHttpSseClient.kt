@@ -6,6 +6,10 @@ import com.github.codeplangui.settings.ProviderConfig
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.contentOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -118,19 +122,48 @@ class OkHttpSseClient(
         request: Request,
         timeoutMessage: String
     ): Result<String> {
-        return try {
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    Result.failure(Exception(buildErrorMessage(response, null, timeoutMessage)))
-                } else {
+        var attempt = 1
+        var lastException: Exception? = null
+
+        while (attempt <= MAX_RETRY_ATTEMPTS) {
+            try {
+                val result = client.newCall(request).execute().use { response ->
                     val body = response.body?.string() ?: ""
-                    val content = extractSyncContent(body)
-                    Result.success(content)
+
+                    // Check if we should retry this response
+                    if (shouldRetryHttp(response, body) && attempt < MAX_RETRY_ATTEMPTS) {
+                        Thread.sleep(calculateBackoff(attempt))
+                        return@use null
+                    }
+
+                    // Not retrying, process the response
+                    if (!response.isSuccessful) {
+                        Result.failure<String>(Exception(buildErrorMessage(response, null, timeoutMessage)))
+                    } else {
+                        val bodyError = parseBodyError(body)
+                        if (bodyError != null) {
+                            Result.failure<String>(Exception(bodyError))
+                        } else {
+                            Result.success(extractSyncContent(body))
+                        }
+                    }
                 }
+
+                // null means retry was triggered
+                if (result != null) return result
+            } catch (e: Exception) {
+                lastException = e
+                if (shouldRetryException(e) && attempt < MAX_RETRY_ATTEMPTS) {
+                    Thread.sleep(calculateBackoff(attempt))
+                    attempt++
+                    continue
+                }
+                return Result.failure(Exception(buildErrorMessage(null, e, timeoutMessage), e))
             }
-        } catch (e: Exception) {
-            Result.failure(Exception(buildErrorMessage(null, e, timeoutMessage), e))
+            attempt++
         }
+
+        return Result.failure(Exception(buildErrorMessage(null, lastException, timeoutMessage), lastException))
     }
 
     fun testConnection(config: ProviderConfig, apiKey: String): TestResult {
@@ -138,8 +171,16 @@ class OkHttpSseClient(
         val request = buildRequest(config, apiKey, testMessages, 0.0, 1, false)
         return try {
             testClient.newCall(request).execute().use { response ->
-                if (response.isSuccessful) TestResult.Success
-                else TestResult.Failure("HTTP ${response.code}: ${response.body?.string()?.take(200)}")
+                val body = response.body?.string() ?: ""
+                if (!response.isSuccessful) {
+                    return TestResult.Failure("HTTP ${response.code}: ${body.take(200)}")
+                }
+                // Some providers return HTTP 200 with error details in body
+                val bodyError = parseBodyError(body)
+                if (bodyError != null) {
+                    return TestResult.Failure("HTTP 200: ${bodyError.take(200)}")
+                }
+                TestResult.Success
             }
         } catch (e: java.net.SocketTimeoutException) {
             TestResult.Failure("连接超时（5s）：请检查 endpoint 是否可访问")
@@ -147,6 +188,129 @@ class OkHttpSseClient(
             TestResult.Failure("无法连接：请检查 endpoint URL")
         } catch (e: Exception) {
             TestResult.Failure(e.message ?: "未知错误")
+        }
+    }
+
+    /**
+     * Checks if a response body indicates an error despite HTTP 200.
+     * Handles providers like GLM/Doubao/Qianwen that wrap errors as:
+     *   {"code": 500, "msg": "404 NOT_FOUND", "success": false}
+     * or standard OpenAI error format:
+     *   {"error": {"message": "...", "type": "..."}}
+     *
+     * Returns enhanced error message with user guidance.
+     */
+    private fun parseBodyError(body: String): String? {
+        return parseBodyErrorDetail(body)?.enhancedMessage
+    }
+
+    /**
+     * Structured error detail parsed from response body.
+     */
+    private data class BodyErrorDetail(
+        val rawMessage: String,
+        val errorType: ErrorType,
+        val enhancedMessage: String
+    )
+
+    /**
+     * Error type classification for better user guidance.
+     */
+    private enum class ErrorType {
+        RETRIABLE_BUSY,  // Service busy, rate limiting
+        QUOTA,           // Insufficient quota, billing issues
+        AUTH,            // Authentication, permission issues
+        GENERIC          // Other errors
+    }
+
+    /**
+     * Determines if an HTTP response should be retried.
+     */
+    private fun shouldRetryHttp(response: Response, body: String): Boolean {
+        if (response.code in RETRIABLE_STATUS_CODES) return true
+        val bodyError = parseBodyErrorDetail(body)
+        return bodyError?.errorType == ErrorType.RETRIABLE_BUSY
+    }
+
+    /**
+     * Determines if an exception should be retried.
+     */
+    private fun shouldRetryException(e: Exception): Boolean {
+        return e is java.net.SocketTimeoutException || e is java.net.ConnectException
+    }
+
+    /**
+     * Calculates exponential backoff delay.
+     */
+    private fun calculateBackoff(attempt: Int): Long {
+        val backoff = RETRY_BASE_DELAY_MS * (2 shl (attempt - 1))
+        return minOf(backoff, RETRY_CAP_DELAY_MS)
+    }
+
+    /**
+     * Parses body and returns structured error detail if an error is found.
+     */
+    private fun parseBodyErrorDetail(body: String): BodyErrorDetail? {
+        return try {
+            val obj = json.parseToJsonElement(body).jsonObject
+
+            // GLM / Doubao / Qianwen style: {"code": 500, "msg": "...", "success": false}
+            val msg = obj["msg"]?.jsonPrimitive?.contentOrNull
+
+            // OpenAI style: {"error": {"message": "..."}}
+            val errorMsg = obj["error"]
+                ?.jsonObject
+                ?.get("message")
+                ?.jsonPrimitive
+                ?.contentOrNull
+
+            val rawError = msg ?: errorMsg ?: return null
+            val errorType = classifyError(rawError)
+
+            BodyErrorDetail(
+                rawMessage = rawError,
+                errorType = errorType,
+                enhancedMessage = enhanceErrorMessage(rawError, errorType)
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Classifies error message into error types for better guidance.
+     */
+    private fun classifyError(msg: String): ErrorType {
+        val lowerMsg = msg.lowercase()
+        return when {
+            QUOTA_PATTERNS.any { it in lowerMsg } -> ErrorType.QUOTA
+            AUTH_PATTERNS.any { it in lowerMsg } -> ErrorType.AUTH
+            BUSY_PATTERNS.any { it in lowerMsg } -> ErrorType.RETRIABLE_BUSY
+            else -> ErrorType.GENERIC
+        }
+    }
+
+    /**
+     * Enhances raw error message with user-friendly guidance.
+     */
+    private fun enhanceErrorMessage(msg: String, errorType: ErrorType): String {
+        return when (errorType) {
+            ErrorType.QUOTA ->
+                "$msg\n→ 提示：请检查账户余额或配额是否充足"
+            ErrorType.AUTH ->
+                "$msg\n→ 提示：请检查 API Key 是否正确"
+            ErrorType.RETRIABLE_BUSY ->
+                "$msg\n→ 提示：服务繁忙，请稍后重试"
+            ErrorType.GENERIC -> {
+                val lowerMsg = msg.lowercase()
+                when {
+                    "404" in msg || "not_found" in lowerMsg ->
+                        "$msg\n→ 提示：请检查 endpoint 路径是否正确（通常需要包含 /v1）"
+                    "model" in lowerMsg && ("not found" in lowerMsg || "invalid" in lowerMsg) ->
+                        "$msg\n→ 提示：请检查模型名称是否正确"
+                    else -> msg
+                }
+            }
         }
     }
 
@@ -172,14 +336,7 @@ class OkHttpSseClient(
 
     private fun extractSyncContent(body: String): String {
         return try {
-            val parsed = Json { ignoreUnknownKeys = true }
-                .parseToJsonElement(body)
-                .let {
-                    it.toString().let { _ ->
-                        Json { ignoreUnknownKeys = true }
-                            .decodeFromString<kotlinx.serialization.json.JsonObject>(body)
-                    }
-                }
+            val parsed = json.parseToJsonElement(body).jsonObject
             parsed["choices"]
                 ?.let { it as? kotlinx.serialization.json.JsonArray }
                 ?.firstOrNull()
@@ -192,5 +349,30 @@ class OkHttpSseClient(
         } catch (_: Exception) {
             body
         }
+    }
+
+    private companion object {
+        // Retry configuration constants
+        private const val MAX_RETRY_ATTEMPTS = 3
+        private const val RETRY_BASE_DELAY_MS = 1000L
+        private const val RETRY_CAP_DELAY_MS = 8000L
+
+        // HTTP status codes that are considered retriable
+        private val RETRIABLE_STATUS_CODES = setOf(408, 409, 425, 429, 500, 502, 503, 504)
+
+        // Error pattern configurations for classification
+        private val BUSY_PATTERNS = listOf(
+            "server busy", "temporarily unavailable", "try again later",
+            "please retry", "please try again", "overloaded", "high demand",
+            "rate limit", "负载较高", "服务繁忙", "稍后重试", "请稍后重试"
+        )
+        private val QUOTA_PATTERNS = listOf(
+            "insufficient_quota", "quota", "billing", "credit", "payment",
+            "余额不足", "超出限额", "额度不足", "欠费"
+        )
+        private val AUTH_PATTERNS = listOf(
+            "authentication", "unauthorized", "invalid api key", "invalid_api_key",
+            "permission", "forbidden", "access denied", "无权", "未授权"
+        )
     }
 }

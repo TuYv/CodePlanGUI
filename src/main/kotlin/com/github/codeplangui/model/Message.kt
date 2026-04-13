@@ -11,11 +11,23 @@ enum class MessageRole {
     USER,
 
     @SerialName("assistant")
-    ASSISTANT
+    ASSISTANT,
+
+    @SerialName("tool")
+    TOOL
 }
+
+@Serializable
+data class ToolCallRecord(
+    val id: String,
+    val functionName: String,
+    val arguments: String
+)
 
 @Serializable
 data class Message(
     val role: MessageRole,
-    val content: String
+    val content: String,
+    val toolCallId: String? = null,
+    val toolCalls: List<ToolCallRecord>? = null
 )

@@ -1,14 +1,18 @@
 package com.github.codeplangui
 
+import com.github.codeplangui.api.FunctionDefinition
 import com.github.codeplangui.api.OkHttpSseClient
 import com.github.codeplangui.api.TestResult
+import com.github.codeplangui.api.ToolDefinition
 import com.github.codeplangui.model.Message
 import com.github.codeplangui.model.MessageRole
 import com.github.codeplangui.settings.ProviderConfig
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -257,5 +261,42 @@ class OkHttpSseClientTest {
         override fun request(): Request = request
 
         override fun cancel() = Unit
+    }
+
+    @Test
+    fun `buildRequest includes tools array when provided`() {
+        val provider = ProviderConfig(
+            id = "test",
+            name = "Test",
+            endpoint = "https://api.example.com/v1",
+            model = "gpt-4"
+        )
+        val tool = ToolDefinition(
+            type = "function",
+            function = FunctionDefinition(
+                name = "run_command",
+                description = "Execute a shell command",
+                parameters = buildJsonObject {
+                    put("type", "object")
+                }
+            )
+        )
+        val client = OkHttpSseClient()
+        val request = client.buildRequest(
+            config = provider,
+            apiKey = "test-key",
+            messages = listOf(Message(MessageRole.USER, "hello")),
+            temperature = 0.7,
+            maxTokens = 100,
+            stream = true,
+            tools = listOf(tool)
+        )
+        val body = request.body!!.let {
+            val buffer = okio.Buffer()
+            it.writeTo(buffer)
+            buffer.readUtf8()
+        }
+        assertTrue(body.contains("\"tools\""), "body should contain tools array")
+        assertTrue(body.contains("run_command"), "body should contain tool name")
     }
 }

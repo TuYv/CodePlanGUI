@@ -6,6 +6,12 @@ import com.github.codeplangui.settings.ProviderConfig
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -17,15 +23,53 @@ import okhttp3.sse.EventSources
 import java.util.concurrent.TimeUnit
 
 @Serializable
-private data class ApiMessage(val role: String, val content: String)
+data class FunctionDefinition(
+    val name: String,
+    val description: String,
+    val parameters: JsonObject
+)
+
+@Serializable
+data class ToolDefinition(
+    val type: String = "function",
+    val function: FunctionDefinition
+)
+
+/** Converts a domain Message to the JSON shape required by the OpenAI API. */
+private fun Message.toApiJson(): JsonObject = buildJsonObject {
+    put("role", role.name.lowercase())
+    when {
+        role == MessageRole.TOOL && toolCallId != null -> {
+            put("tool_call_id", toolCallId)
+            put("content", content)
+        }
+        toolCalls != null -> {
+            put("content", JsonNull)
+            put("tool_calls", buildJsonArray {
+                toolCalls.forEach { tc ->
+                    add(buildJsonObject {
+                        put("id", tc.id)
+                        put("type", "function")
+                        put("function", buildJsonObject {
+                            put("name", tc.functionName)
+                            put("arguments", tc.arguments)
+                        })
+                    })
+                }
+            })
+        }
+        else -> put("content", content)
+    }
+}
 
 @Serializable
 private data class ChatRequestBody(
     val model: String,
-    val messages: List<ApiMessage>,
+    val messages: List<JsonObject>,
     val stream: Boolean,
     val temperature: Double,
-    val max_tokens: Int
+    val max_tokens: Int,
+    val tools: List<ToolDefinition>? = null
 )
 
 sealed class TestResult {
@@ -61,19 +105,18 @@ class OkHttpSseClient(
         messages: List<Message>,
         temperature: Double,
         maxTokens: Int,
-        stream: Boolean
+        stream: Boolean,
+        tools: List<ToolDefinition>? = null
     ): Request {
         val endpoint = config.endpoint.trimEnd('/') + "/chat/completions"
-        val apiMessages = messages.map {
-            ApiMessage(it.role.name.lowercase(), it.content)
-        }
         val body = json.encodeToString(
             ChatRequestBody(
                 model = config.model,
-                messages = apiMessages,
+                messages = messages.map { it.toApiJson() },
                 stream = stream,
                 temperature = temperature,
-                max_tokens = maxTokens
+                max_tokens = maxTokens,
+                tools = tools
             )
         )
         return Request.Builder()
@@ -88,13 +131,31 @@ class OkHttpSseClient(
         request: Request,
         onToken: (String) -> Unit,
         onEnd: () -> Unit,
-        onError: (String) -> Unit
+        onError: (String) -> Unit,
+        onToolCallChunk: (ToolCallDelta) -> Unit = {},
+        onFinishReason: (String) -> Unit = {}
     ): EventSource {
         val listener = object : EventSourceListener() {
+            // Suppresses [DONE]→onEnd when the stream ends with finish_reason=="tool_calls".
+            // The second API round will call onEnd instead.
+            private var isToolCallStream = false
+
             override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
+                val finishReason = SseChunkParser.extractFinishReason(data)
+                if (finishReason != null) {
+                    onFinishReason(finishReason)
+                    if (finishReason == "tool_calls") isToolCallStream = true
+                }
+
+                val toolCallDelta = SseChunkParser.extractToolCallChunk(data)
+                if (toolCallDelta != null) {
+                    onToolCallChunk(toolCallDelta)
+                    return
+                }
+
                 val token = SseChunkParser.extractToken(data)
                 if (token != null) onToken(token)
-                if (data.trim() == "[DONE]") onEnd()
+                if (data.trim() == "[DONE]" && !isToolCallStream) onEnd()
             }
 
             override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {

@@ -1,9 +1,15 @@
 package com.github.codeplangui
 
 import com.github.codeplangui.api.OkHttpSseClient
+import com.github.codeplangui.api.ToolCallDelta
+import com.github.codeplangui.api.ToolDefinition
+import com.github.codeplangui.api.FunctionDefinition
+import com.github.codeplangui.execution.CommandExecutionService
+import com.github.codeplangui.execution.ExecutionResult
 import com.github.codeplangui.model.ChatSession
 import com.github.codeplangui.model.Message
 import com.github.codeplangui.model.MessageRole
+import com.github.codeplangui.model.ToolCallRecord
 import com.github.codeplangui.settings.ApiKeyStore
 import com.github.codeplangui.settings.PluginSettings
 import com.github.codeplangui.settings.PluginSettingsConfigurable
@@ -19,8 +25,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import okhttp3.sse.EventSource
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 @Service(Service.Level.PROJECT)
 class ChatService(private val project: Project) : Disposable {
@@ -38,6 +55,16 @@ class ChatService(private val project: Project) : Disposable {
     private var contextFileCallback: ((String) -> Unit)? = null
     private var onFrontendReadyCallback: (() -> Unit)? = null
     private var isFrontendReady: Boolean = false
+
+    // Tool call state machine
+    private enum class StreamState { TEXT, ACCUMULATING_TOOL_CALL }
+    private var streamState = StreamState.TEXT
+    private var pendingToolCallId: String? = null
+    private var pendingFunctionName: String? = null
+    private val argumentsBuffer = StringBuilder()
+
+    // Approval gate: suspended coroutines wait on these futures
+    private val pendingApprovals = ConcurrentHashMap<String, CompletableFuture<Boolean>>()
 
     fun attachBridge(handler: BridgeHandler) {
         bridgeHandler = handler
@@ -95,16 +122,27 @@ class ChatService(private val project: Project) : Disposable {
         session.setSystemMessage(systemContent)
         session.add(Message(MessageRole.USER, text))
 
+        // Reset state machine before each new user-initiated request
+        streamState = StreamState.TEXT
+        pendingToolCallId = null
+        pendingFunctionName = null
+        argumentsBuffer.clear()
+
         val msgId = UUID.randomUUID().toString()
         activeMessageId = msgId
         publishStatus()
+
+        val pluginSettings = PluginSettings.getInstance()
+        val commandExecutionEnabled = pluginSettings.getState().commandExecutionEnabled
+
         val request = client.buildRequest(
             config = provider,
             apiKey = apiKey,
             messages = session.getApiMessages(),
             temperature = settings.getState().chatTemperature,
             maxTokens = settings.getState().chatMaxTokens,
-            stream = true
+            stream = true,
+            tools = if (commandExecutionEnabled) listOf(runCommandToolDefinition()) else null
         )
 
         bridgeHandler?.notifyStart(msgId)
@@ -134,6 +172,16 @@ class ChatService(private val project: Project) : Disposable {
                         activeMessageId = null
                         publishStatus()
                         bridgeHandler?.notifyError(message)
+                    }
+                },
+                onToolCallChunk = { delta ->
+                    handleToolCallChunk(delta)
+                },
+                onFinishReason = { reason ->
+                    if (reason == "tool_calls") {
+                        val capturedMsgId = msgId
+                        val capturedBuffer = responseBuffer
+                        scope.launch { handleToolCallComplete(capturedMsgId, capturedBuffer) }
                     }
                 }
             )
@@ -177,11 +225,186 @@ class ChatService(private val project: Project) : Disposable {
     }
 
     fun onApprovalResponse(requestId: String, decision: String) {
-        // Will be implemented in Task 7
+        pendingApprovals[requestId]?.complete(decision == "allow")
     }
 
     fun refreshBridgeStatus() {
         publishStatus()
+    }
+
+    private fun runCommandToolDefinition(): ToolDefinition = ToolDefinition(
+        type = "function",
+        function = FunctionDefinition(
+            name = "run_command",
+            description = "Execute a shell command in the project root directory. " +
+                "Only use when the user asks you to run something or when you need to " +
+                "inspect state to answer accurately.",
+            parameters = buildJsonObject {
+                put("type", "object")
+                put("properties", buildJsonObject {
+                    put("command", buildJsonObject {
+                        put("type", "string")
+                        put("description", "The shell command to execute")
+                    })
+                    put("description", buildJsonObject {
+                        put("type", "string")
+                        put("description", "One-line explanation of why you are running this command")
+                    })
+                })
+                put("required", buildJsonArray {
+                    add(JsonPrimitive("command"))
+                    add(JsonPrimitive("description"))
+                })
+            }
+        )
+    )
+
+    private fun handleToolCallChunk(delta: ToolCallDelta) {
+        if (delta.id != null) {
+            pendingToolCallId = delta.id
+            pendingFunctionName = delta.functionName
+            streamState = StreamState.ACCUMULATING_TOOL_CALL
+        }
+        delta.argumentsChunk?.let { argumentsBuffer.append(it) }
+    }
+
+    private suspend fun handleToolCallComplete(msgId: String, responseBuffer: StringBuilder) {
+        val toolCallId = pendingToolCallId ?: return
+        val argsJson = argumentsBuffer.toString()
+
+        val argsObj = try {
+            kotlinx.serialization.json.Json.parseToJsonElement(argsJson).jsonObject
+        } catch (_: Exception) {
+            bridgeHandler?.notifyError("AI returned malformed tool call arguments")
+            return
+        }
+        val command = argsObj["command"]?.jsonPrimitive?.contentOrNull ?: return
+        val description = argsObj["description"]?.jsonPrimitive?.contentOrNull ?: ""
+
+        val state = PluginSettings.getInstance().getState()
+        val requestId = UUID.randomUUID().toString()
+
+        // Show execution card placeholder in Vue
+        bridgeHandler?.notifyApprovalRequest(requestId, command, description)
+
+        // Whitelist check — blocked without showing dialog
+        if (!CommandExecutionService.isWhitelisted(command, state.commandWhitelist)) {
+            val result = ExecutionResult.Blocked(
+                command, "'${CommandExecutionService.extractBaseCommand(command)}' is not in the allowed command list"
+            )
+            bridgeHandler?.notifyExecutionStatus(requestId, "blocked", result.toToolResultContent())
+            continueWithToolResult(msgId, toolCallId, argsJson, responseBuffer, result)
+            return
+        }
+
+        // Path safety check
+        val basePath = project.basePath ?: ""
+        if (CommandExecutionService.hasPathsOutsideWorkspace(command, basePath)) {
+            val result = ExecutionResult.Blocked(command, "Command accesses paths outside the project")
+            bridgeHandler?.notifyExecutionStatus(requestId, "blocked", result.toToolResultContent())
+            continueWithToolResult(msgId, toolCallId, argsJson, responseBuffer, result)
+            return
+        }
+
+        // Suspend and wait for user approval (max 60s)
+        val future = CompletableFuture<Boolean>()
+        pendingApprovals[requestId] = future
+        bridgeHandler?.notifyExecutionStatus(requestId, "waiting", "{}")
+
+        val approved = try {
+            withContext(Dispatchers.IO) { future.get(60, TimeUnit.SECONDS) }
+        } catch (_: Exception) {
+            false
+        } finally {
+            pendingApprovals.remove(requestId)
+        }
+
+        if (!approved) {
+            val result = ExecutionResult.Denied(command, "User rejected the command")
+            bridgeHandler?.notifyExecutionStatus(requestId, "denied", result.toToolResultContent())
+            continueWithToolResult(msgId, toolCallId, argsJson, responseBuffer, result)
+            return
+        }
+
+        // Execute
+        bridgeHandler?.notifyExecutionStatus(requestId, "running", "{}")
+        val execService = CommandExecutionService.getInstance(project)
+        val result = execService.executeAsync(command, state.commandTimeoutSeconds)
+        val bridgeStatus = if (result is ExecutionResult.TimedOut) "timeout" else "done"
+        bridgeHandler?.notifyExecutionStatus(requestId, bridgeStatus, result.toToolResultContent())
+
+        continueWithToolResult(msgId, toolCallId, argsJson, responseBuffer, result)
+    }
+
+    private fun continueWithToolResult(
+        msgId: String,
+        toolCallId: String,
+        argsJson: String,
+        responseBuffer: StringBuilder,
+        result: ExecutionResult
+    ) {
+        // Assistant message must carry tool_calls for the OpenAI API to accept the follow-up tool result
+        session.add(Message(
+            role = MessageRole.ASSISTANT,
+            content = responseBuffer.toString(),
+            toolCalls = listOf(ToolCallRecord(
+                id = toolCallId,
+                functionName = pendingFunctionName ?: "run_command",
+                arguments = argsJson
+            ))
+        ))
+        // Tool result message
+        session.add(Message(
+            role = MessageRole.TOOL,
+            content = result.toToolResultContent(),
+            toolCallId = toolCallId
+        ))
+
+        // Reset state machine
+        streamState = StreamState.TEXT
+        pendingToolCallId = null
+        pendingFunctionName = null
+        argumentsBuffer.clear()
+        responseBuffer.clear()
+
+        sendMessageInternal(msgId)
+    }
+
+    private fun sendMessageInternal(msgId: String) {
+        val pluginSettings = PluginSettings.getInstance()
+        val provider = pluginSettings.getActiveProvider() ?: return
+        val apiKey = ApiKeyStore.load(provider.id) ?: return
+
+        val request = client.buildRequest(
+            config = provider,
+            apiKey = apiKey,
+            messages = session.getApiMessages(),
+            temperature = pluginSettings.getState().chatTemperature,
+            maxTokens = pluginSettings.getState().chatMaxTokens,
+            stream = true,
+            tools = null  // no tools on the follow-up round
+        )
+
+        scope.launch {
+            client.streamChat(
+                request = request,
+                onToken = { token ->
+                    bridgeHandler?.notifyToken(token)
+                },
+                onEnd = {
+                    activeStream = null
+                    activeMessageId = null
+                    publishStatus()
+                    bridgeHandler?.notifyEnd(msgId)
+                },
+                onError = { message ->
+                    activeStream = null
+                    activeMessageId = null
+                    publishStatus()
+                    bridgeHandler?.notifyError(message)
+                }
+            )
+        }
     }
 
     private fun capturePromptContextSnapshot(): PromptContextSnapshot? {

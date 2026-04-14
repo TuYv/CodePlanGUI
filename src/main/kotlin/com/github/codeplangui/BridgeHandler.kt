@@ -16,7 +16,9 @@ import org.cef.handler.CefLoadHandlerAdapter
 private data class BridgePayload(
     val type: String,
     val text: String = "",
-    val includeContext: Boolean = true
+    val includeContext: Boolean = true,
+    val requestId: String = "",
+    val decision: String = ""
 )
 
 internal interface BridgeCommands {
@@ -24,19 +26,23 @@ internal interface BridgeCommands {
     fun newChat()
     fun openSettings()
     fun onFrontendReady()
+    fun approvalResponse(requestId: String, decision: String)
 }
 
 internal fun dispatchBridgeRequest(
     type: String,
     text: String,
     includeContext: Boolean,
+    requestId: String = "",
+    decision: String = "",
     commands: BridgeCommands
 ) {
     when (type) {
-        "sendMessage" -> commands.sendMessage(text, includeContext)
-        "newChat" -> commands.newChat()
-        "openSettings" -> commands.openSettings()
-        "frontendReady" -> commands.onFrontendReady()
+        "sendMessage"      -> commands.sendMessage(text, includeContext)
+        "newChat"          -> commands.newChat()
+        "openSettings"     -> commands.openSettings()
+        "frontendReady"    -> commands.onFrontendReady()
+        "approvalResponse" -> commands.approvalResponse(requestId, decision)
     }
 }
 
@@ -58,7 +64,7 @@ internal fun handleBridgePayload(
     }
 
     return try {
-        dispatchBridgeRequest(req.type, req.text, req.includeContext, commands)
+        dispatchBridgeRequest(req.type, req.text, req.includeContext, req.requestId, req.decision, commands)
         BridgePayloadHandlingResult.Success
     } catch (e: Exception) {
         BridgePayloadHandlingResult.CommandError(
@@ -104,6 +110,10 @@ class BridgeHandler(
                     override fun onFrontendReady() {
                         chatService.onFrontendReady()
                     }
+
+                    override fun approvalResponse(requestId: String, decision: String) {
+                        chatService.onApprovalResponse(requestId, decision)
+                    }
                 })) {
                 BridgePayloadHandlingResult.Success -> null
                 BridgePayloadHandlingResult.MalformedPayload -> {
@@ -138,13 +148,18 @@ class BridgeHandler(
                             frontendReady: function() {
                                 ${sendQuery.inject("""JSON.stringify({type:'frontendReady',text:''})""")}
                             },
+                            approvalResponse: function(requestId, decision) {
+                                ${sendQuery.inject("""JSON.stringify({type:'approvalResponse',text:'',requestId:requestId,decision:decision})""")}
+                            },
                             onStart: function(msgId) {},
                             onToken: function(token) {},
                             onEnd: function(msgId) {},
                             onError: function(message) {},
                             onStatus: function(status) {},
                             onContextFile: function(fileName) {},
-                            onTheme: function(theme) {}
+                            onTheme: function(theme) {},
+                            onApprovalRequest: function(requestId, command, description) {},
+                            onExecutionStatus: function(requestId, status, result) {}
                         };
                         document.dispatchEvent(new Event('bridge_ready'));
                     """.trimIndent()
@@ -170,6 +185,22 @@ class BridgeHandler(
 
     fun notifyTheme(theme: String) =
         pushJS("window.__bridge.onTheme(${json.encodeToString(theme)})")
+
+    fun notifyApprovalRequest(requestId: String, command: String, description: String) =
+        pushJS(
+            "window.__bridge.onApprovalRequest(" +
+            "${json.encodeToString(requestId)}," +
+            "${json.encodeToString(command)}," +
+            "${json.encodeToString(description)})"
+        )
+
+    fun notifyExecutionStatus(requestId: String, status: String, resultJson: String) =
+        pushJS(
+            "window.__bridge.onExecutionStatus(" +
+            "${json.encodeToString(requestId)}," +
+            "${json.encodeToString(status)}," +
+            "$resultJson)"
+        )
 
     private fun pushJS(js: String) {
         if (!isReady) return

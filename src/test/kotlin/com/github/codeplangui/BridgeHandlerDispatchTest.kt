@@ -50,6 +50,8 @@ class BridgeHandlerDispatchTest {
                 override fun openSettings() = Unit
 
                 override fun onFrontendReady() = Unit
+
+                override fun approvalResponse(requestId: String, decision: String) = Unit
             }
         )
 
@@ -57,9 +59,26 @@ class BridgeHandlerDispatchTest {
         assertEquals("发送消息失败：boom", error.message)
     }
 
+    @Test
+    fun `dispatchBridgeRequest routes approvalResponse`() {
+        val commands = RecordingBridgeCommands()
+
+        dispatchBridgeRequest(
+            type = "approvalResponse",
+            text = "",
+            includeContext = false,
+            requestId = "req-123",
+            decision = "allow",
+            commands = commands
+        )
+
+        assertEquals(listOf(Pair("req-123", "allow")), commands.approvalResponses)
+    }
+
     private class RecordingBridgeCommands : BridgeCommands {
         val sentMessages = mutableListOf<SentMessage>()
         var frontendReadyCalls: Int = 0
+        val approvalResponses = mutableListOf<Pair<String, String>>()
 
         override fun sendMessage(text: String, includeContext: Boolean) {
             sentMessages += SentMessage(text, includeContext)
@@ -71,6 +90,10 @@ class BridgeHandlerDispatchTest {
 
         override fun onFrontendReady() {
             frontendReadyCalls += 1
+        }
+
+        override fun approvalResponse(requestId: String, decision: String) {
+            approvalResponses += Pair(requestId, decision)
         }
     }
 }

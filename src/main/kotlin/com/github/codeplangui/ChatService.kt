@@ -176,6 +176,10 @@ class ChatService(private val project: Project) : Disposable {
         )
     }
 
+    fun onApprovalResponse(requestId: String, decision: String) {
+        // Will be implemented in Task 7
+    }
+
     fun refreshBridgeStatus() {
         publishStatus()
     }

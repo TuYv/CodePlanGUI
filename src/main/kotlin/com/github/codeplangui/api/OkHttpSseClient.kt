@@ -1,3 +1,5 @@
+@file:OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+
 package com.github.codeplangui.api
 
 import com.github.codeplangui.model.Message
@@ -95,7 +97,7 @@ class OkHttpSseClient(
         .readTimeout(5, TimeUnit.SECONDS)
         .callTimeout(5, TimeUnit.SECONDS)
         .build(),
-    private val json: Json = Json { ignoreUnknownKeys = true },
+    private val json: Json = Json { ignoreUnknownKeys = true; explicitNulls = false },
     private val eventSourceFactory: EventSource.Factory = EventSources.createFactory(streamClient)
 ) {
 
@@ -159,7 +161,13 @@ class OkHttpSseClient(
             }
 
             override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
-                val msg = buildErrorMessage(response, t)
+                // Peek the body before buildErrorMessage consumes it, so 400 details are visible
+                val peeked = try { response?.peekBody(800)?.string() } catch (_: Exception) { null }
+                val msg = if (!peeked.isNullOrBlank() && response?.code in listOf(400, 422)) {
+                    "HTTP ${response?.code}：$peeked"
+                } else {
+                    buildErrorMessage(response, t)
+                }
                 onError(msg)
             }
         }
@@ -220,7 +228,11 @@ class OkHttpSseClient(
             401 -> "HTTP 401：API Key 无效或已过期"
             403 -> "HTTP 403：访问被拒绝，请检查 endpoint 和 Key"
             404 -> "HTTP 404：endpoint 路径不正确（应包含 /v1）"
-            422, 400 -> "HTTP ${response.code}：请求格式错误，请检查 model 名称"
+            422, 400 -> {
+                val detail = try { response.body?.string()?.take(400) } catch (_: Exception) { null }
+                if (!detail.isNullOrBlank()) "HTTP ${response.code}：$detail"
+                else "HTTP ${response.code}：请求格式错误，请检查 model 名称"
+            }
             429 -> "HTTP 429：已触发限流，请稍候再试"
             in 500..599 -> "HTTP ${response.code}：服务端错误"
             else -> "HTTP ${response.code}: ${response.body?.string()?.take(200)}"

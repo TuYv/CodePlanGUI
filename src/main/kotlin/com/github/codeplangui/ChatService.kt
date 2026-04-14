@@ -1,6 +1,7 @@
 package com.github.codeplangui
 
 import com.github.codeplangui.api.OkHttpSseClient
+import com.github.codeplangui.api.ToolCallAccumulator
 import com.github.codeplangui.api.ToolCallDelta
 import com.github.codeplangui.api.ToolDefinition
 import com.github.codeplangui.api.FunctionDefinition
@@ -13,10 +14,12 @@ import com.github.codeplangui.model.ToolCallRecord
 import com.github.codeplangui.settings.ApiKeyStore
 import com.github.codeplangui.settings.PluginSettings
 import com.github.codeplangui.settings.PluginSettingsConfigurable
+import com.github.codeplangui.settings.SettingsState
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.options.ShowSettingsUtil
@@ -41,6 +44,7 @@ import java.util.concurrent.TimeUnit
 
 @Service(Service.Level.PROJECT)
 class ChatService(private val project: Project) : Disposable {
+    private val logger = Logger.getInstance(ChatService::class.java)
 
     private val client = OkHttpSseClient()
     private val session = ChatSession()
@@ -57,11 +61,7 @@ class ChatService(private val project: Project) : Disposable {
     private var isFrontendReady: Boolean = false
 
     // Tool call state machine
-    private enum class StreamState { TEXT, ACCUMULATING_TOOL_CALL }
-    private var streamState = StreamState.TEXT
-    private var pendingToolCallId: String? = null
-    private var pendingFunctionName: String? = null
-    private val argumentsBuffer = StringBuilder()
+    private val toolCallAccumulator = ToolCallAccumulator()
 
     // Approval gate: suspended coroutines wait on these futures
     private val pendingApprovals = ConcurrentHashMap<String, CompletableFuture<Boolean>>()
@@ -125,10 +125,7 @@ class ChatService(private val project: Project) : Disposable {
         session.add(Message(MessageRole.USER, text))
 
         // Reset state machine before each new user-initiated request
-        streamState = StreamState.TEXT
-        pendingToolCallId = null
-        pendingFunctionName = null
-        argumentsBuffer.clear()
+        resetToolCallState()
 
         val msgId = UUID.randomUUID().toString()
         activeMessageId = msgId
@@ -145,57 +142,14 @@ class ChatService(private val project: Project) : Disposable {
         )
 
         bridgeHandler?.notifyStart(msgId)
-
-        val responseBuffer = StringBuilder()
-        scope.launch {
-            val stream = client.streamChat(
-                request = request,
-                onToken = { token ->
-                    if (activeMessageId == msgId) {
-                        responseBuffer.append(token)
-                        bridgeHandler?.notifyToken(token)
-                    }
-                },
-                onEnd = {
-                    if (activeMessageId == msgId) {
-                        session.add(Message(MessageRole.ASSISTANT, responseBuffer.toString()))
-                        activeStream = null
-                        activeMessageId = null
-                        publishStatus()
-                        bridgeHandler?.notifyEnd(msgId)
-                    }
-                },
-                onError = { message ->
-                    if (activeMessageId == msgId) {
-                        activeStream = null
-                        activeMessageId = null
-                        publishStatus()
-                        bridgeHandler?.notifyError(message)
-                    }
-                },
-                onToolCallChunk = { delta ->
-                    handleToolCallChunk(delta)
-                },
-                onFinishReason = { reason ->
-                    if (reason == "tool_calls") {
-                        val capturedMsgId = msgId
-                        val capturedBuffer = responseBuffer
-                        scope.launch { handleToolCallComplete(capturedMsgId, capturedBuffer) }
-                    }
-                }
-            )
-            if (activeMessageId == msgId) {
-                activeStream = stream
-            } else {
-                stream.cancel()
-            }
-        }
+        startStreamingRound(msgId, request, toolsEnabled = commandExecutionEnabled)
     }
 
     fun newChat() {
         activeStream?.cancel()
         activeStream = null
         activeMessageId = null
+        resetToolCallState()
         session.clear()
         contextFileCallback?.invoke("")
         publishStatus()
@@ -224,6 +178,10 @@ class ChatService(private val project: Project) : Disposable {
     }
 
     fun onApprovalResponse(requestId: String, decision: String) {
+        logger.info(
+            "[CodePlanGUI Approval] received frontend decision " +
+                "requestId=$requestId decision=$decision hasPending=${pendingApprovals.containsKey(requestId)}"
+        )
         pendingApprovals[requestId]?.complete(decision == "allow")
     }
 
@@ -259,111 +217,58 @@ class ChatService(private val project: Project) : Disposable {
     )
 
     private fun handleToolCallChunk(delta: ToolCallDelta) {
-        if (delta.id != null) {
-            pendingToolCallId = delta.id
-            pendingFunctionName = delta.functionName
-            streamState = StreamState.ACCUMULATING_TOOL_CALL
-        }
-        delta.argumentsChunk?.let { argumentsBuffer.append(it) }
+        toolCallAccumulator.append(delta)
     }
 
     private suspend fun handleToolCallComplete(msgId: String, responseBuffer: StringBuilder) {
-        val toolCallId = pendingToolCallId ?: return
-        val argsJson = argumentsBuffer.toString()
-
-        val argsObj = try {
-            kotlinx.serialization.json.Json.parseToJsonElement(argsJson).jsonObject
-        } catch (_: Exception) {
-            bridgeHandler?.notifyError("AI returned malformed tool call arguments")
-            return
-        }
-        val command = argsObj["command"]?.jsonPrimitive?.contentOrNull ?: return
-        val description = argsObj["description"]?.jsonPrimitive?.contentOrNull ?: ""
-
+        val preparedToolCalls = prepareToolCallsForExecution(msgId) ?: return
         val state = PluginSettings.getInstance().getState()
-        val requestId = UUID.randomUUID().toString()
+        val completedToolCalls = mutableListOf<CompletedToolCall>()
 
-        // Show execution card placeholder in Vue
-        bridgeHandler?.notifyApprovalRequest(requestId, command, description)
+        logger.info(
+            "[CodePlanGUI Approval] executing tool-call batch " +
+                "msgId=$msgId toolCallCount=${preparedToolCalls.size}"
+        )
 
-        // Whitelist check — blocked without showing dialog
-        if (!CommandExecutionService.isWhitelisted(command, state.commandWhitelist)) {
-            val result = ExecutionResult.Blocked(
-                command, "'${CommandExecutionService.extractBaseCommand(command)}' is not in the allowed command list"
-            )
-            bridgeHandler?.notifyExecutionStatus(requestId, "blocked", result.toToolResultContent())
-            continueWithToolResult(msgId, toolCallId, argsJson, responseBuffer, result)
-            return
+        for (toolCall in preparedToolCalls) {
+            completedToolCalls += executeToolCallWithApproval(msgId, toolCall, state)
         }
 
-        // Path safety check
-        val basePath = project.basePath ?: ""
-        if (CommandExecutionService.hasPathsOutsideWorkspace(command, basePath)) {
-            val result = ExecutionResult.Blocked(command, "Command accesses paths outside the project")
-            bridgeHandler?.notifyExecutionStatus(requestId, "blocked", result.toToolResultContent())
-            continueWithToolResult(msgId, toolCallId, argsJson, responseBuffer, result)
-            return
-        }
-
-        // Suspend and wait for user approval (max 60s)
-        val future = CompletableFuture<Boolean>()
-        pendingApprovals[requestId] = future
-        bridgeHandler?.notifyExecutionStatus(requestId, "waiting", "{}")
-
-        val approved = try {
-            withContext(Dispatchers.IO) { future.get(60, TimeUnit.SECONDS) }
-        } catch (_: Exception) {
-            false
-        } finally {
-            pendingApprovals.remove(requestId)
-        }
-
-        if (!approved) {
-            val result = ExecutionResult.Denied(command, "User rejected the command")
-            bridgeHandler?.notifyExecutionStatus(requestId, "denied", result.toToolResultContent())
-            continueWithToolResult(msgId, toolCallId, argsJson, responseBuffer, result)
-            return
-        }
-
-        // Execute
-        bridgeHandler?.notifyExecutionStatus(requestId, "running", "{}")
-        val execService = CommandExecutionService.getInstance(project)
-        val result = execService.executeAsync(command, state.commandTimeoutSeconds)
-        val bridgeStatus = if (result is ExecutionResult.TimedOut) "timeout" else "done"
-        bridgeHandler?.notifyExecutionStatus(requestId, bridgeStatus, result.toToolResultContent())
-
-        continueWithToolResult(msgId, toolCallId, argsJson, responseBuffer, result)
+        continueWithToolResults(msgId, responseBuffer, completedToolCalls)
     }
 
-    private fun continueWithToolResult(
+    private fun continueWithToolResults(
         msgId: String,
-        toolCallId: String,
-        argsJson: String,
         responseBuffer: StringBuilder,
-        result: ExecutionResult
+        completedToolCalls: List<CompletedToolCall>
     ) {
+        logger.info(
+            "[CodePlanGUI Approval] continuing conversation with tool results " +
+                "msgId=$msgId toolCallCount=${completedToolCalls.size} " +
+                "results=${completedToolCalls.joinToString { "index=${it.toolCall.index}:${it.result.summarizeForLog()}" }}"
+        )
         // Assistant message must carry tool_calls for the OpenAI API to accept the follow-up tool result
         session.add(Message(
             role = MessageRole.ASSISTANT,
             content = responseBuffer.toString(),
-            toolCalls = listOf(ToolCallRecord(
-                id = toolCallId,
-                functionName = pendingFunctionName ?: "run_command",
-                arguments = argsJson
+            toolCalls = completedToolCalls.map {
+                ToolCallRecord(
+                    id = it.toolCall.id,
+                    functionName = it.toolCall.functionName,
+                    arguments = it.toolCall.argumentsJson
+                )
+            }
+        ))
+        completedToolCalls.forEach {
+            session.add(Message(
+                role = MessageRole.TOOL,
+                content = it.result.toToolResultContent(),
+                toolCallId = it.toolCall.id
             ))
-        ))
-        // Tool result message
-        session.add(Message(
-            role = MessageRole.TOOL,
-            content = result.toToolResultContent(),
-            toolCallId = toolCallId
-        ))
+        }
 
         // Reset state machine
-        streamState = StreamState.TEXT
-        pendingToolCallId = null
-        pendingFunctionName = null
-        argumentsBuffer.clear()
+        resetToolCallState()
         responseBuffer.clear()
 
         sendMessageInternal(msgId)
@@ -373,6 +278,8 @@ class ChatService(private val project: Project) : Disposable {
         val pluginSettings = PluginSettings.getInstance()
         val provider = pluginSettings.getActiveProvider() ?: return
         val apiKey = ApiKeyStore.load(provider.id) ?: return
+        val commandExecutionEnabled = pluginSettings.getState().commandExecutionEnabled
+        logger.info("[CodePlanGUI Approval] starting follow-up model round msgId=$msgId")
 
         val request = client.buildRequest(
             config = provider,
@@ -381,29 +288,10 @@ class ChatService(private val project: Project) : Disposable {
             temperature = pluginSettings.getState().chatTemperature,
             maxTokens = pluginSettings.getState().chatMaxTokens,
             stream = true,
-            tools = null  // no tools on the follow-up round
+            tools = if (commandExecutionEnabled) listOf(runCommandToolDefinition()) else null
         )
 
-        scope.launch {
-            client.streamChat(
-                request = request,
-                onToken = { token ->
-                    bridgeHandler?.notifyToken(token)
-                },
-                onEnd = {
-                    activeStream = null
-                    activeMessageId = null
-                    publishStatus()
-                    bridgeHandler?.notifyEnd(msgId)
-                },
-                onError = { message ->
-                    activeStream = null
-                    activeMessageId = null
-                    publishStatus()
-                    bridgeHandler?.notifyError(message)
-                }
-            )
-        }
+        startStreamingRound(msgId, request, toolsEnabled = commandExecutionEnabled)
     }
 
     private fun capturePromptContextSnapshot(): PromptContextSnapshot? {
@@ -447,6 +335,213 @@ $selection
         bridgeHandler?.notifyStatus(status)
     }
 
+    /** Terminates an in-progress stream with an error and resets all state, preventing a permanent stuck spinner. */
+    private fun abortStream(msgId: String, errorMessage: String) {
+        if (activeMessageId != msgId) return
+        logger.warn("[CodePlanGUI Approval] aborting stream msgId=$msgId error=${errorMessage.summarizeForLog(240)}")
+        activeStream?.cancel()
+        activeStream = null
+        activeMessageId = null
+        resetToolCallState()
+        publishStatus()
+        bridgeHandler?.notifyError(errorMessage)
+    }
+
+    private fun startStreamingRound(msgId: String, request: okhttp3.Request, toolsEnabled: Boolean) {
+        val responseBuffer = StringBuilder()
+        scope.launch {
+            val stream = client.streamChat(
+                request = request,
+                onToken = { token ->
+                    if (activeMessageId == msgId) {
+                        responseBuffer.append(token)
+                        bridgeHandler?.notifyToken(token)
+                    }
+                },
+                onEnd = {
+                    if (activeMessageId == msgId) {
+                        logger.info("[CodePlanGUI Approval] model round completed msgId=$msgId")
+                        session.add(Message(MessageRole.ASSISTANT, responseBuffer.toString()))
+                        activeStream = null
+                        activeMessageId = null
+                        publishStatus()
+                        bridgeHandler?.notifyEnd(msgId)
+                    }
+                },
+                onError = { message ->
+                    if (activeMessageId == msgId) {
+                        logger.warn("[CodePlanGUI Approval] model round failed msgId=$msgId error=$message")
+                        activeStream = null
+                        activeMessageId = null
+                        publishStatus()
+                        bridgeHandler?.notifyError(message)
+                    }
+                },
+                onToolCallChunk = { delta ->
+                    if (toolsEnabled && activeMessageId == msgId) {
+                        handleToolCallChunk(delta)
+                    }
+                },
+                onFinishReason = { reason ->
+                    if (toolsEnabled && reason == "tool_calls" && activeMessageId == msgId) {
+                        val capturedBuffer = responseBuffer
+                        scope.launch { handleToolCallComplete(msgId, capturedBuffer) }
+                    }
+                }
+            )
+            if (activeMessageId == msgId) {
+                activeStream = stream
+            } else {
+                stream.cancel()
+            }
+        }
+    }
+
+    private fun resetToolCallState() {
+        toolCallAccumulator.clear()
+    }
+
+    private fun prepareToolCallsForExecution(msgId: String): List<PreparedToolCall>? {
+        val accumulatedToolCalls = toolCallAccumulator.snapshot()
+        if (accumulatedToolCalls.isEmpty()) {
+            abortStream(msgId, "AI sent a tool_calls finish_reason but no tool call deltas were captured")
+            return null
+        }
+
+        return accumulatedToolCalls.map { accumulated ->
+            val toolCallId = accumulated.id ?: run {
+                abortStream(
+                    msgId,
+                    "AI sent a tool_calls finish_reason but tool call index ${accumulated.index} had no id"
+                )
+                return null
+            }
+            val argsJson = accumulated.argumentsJson
+            val argsObj = try {
+                kotlinx.serialization.json.Json.parseToJsonElement(argsJson).jsonObject
+            } catch (_: Exception) {
+                abortStream(msgId, "AI returned malformed tool call arguments for index ${accumulated.index}: '$argsJson'")
+                return null
+            }
+            val command = argsObj["command"]?.jsonPrimitive?.contentOrNull ?: run {
+                abortStream(msgId, "AI tool call index ${accumulated.index} is missing required 'command' field")
+                return null
+            }
+            val description = argsObj["description"]?.jsonPrimitive?.contentOrNull ?: ""
+
+            PreparedToolCall(
+                index = accumulated.index,
+                id = toolCallId,
+                functionName = accumulated.functionName ?: "run_command",
+                argumentsJson = argsJson,
+                command = command,
+                description = description
+            )
+        }
+    }
+
+    private suspend fun executeToolCallWithApproval(
+        msgId: String,
+        toolCall: PreparedToolCall,
+        state: SettingsState
+    ): CompletedToolCall {
+        val requestId = UUID.randomUUID().toString()
+        logger.info(
+            "[CodePlanGUI Approval] prepared approval request " +
+                "requestId=$requestId msgId=$msgId toolCallId=${toolCall.id} index=${toolCall.index} " +
+                "function=${toolCall.functionName} command=${toolCall.command.summarizeForLog()} " +
+                "description=${toolCall.description.summarizeForLog()}"
+        )
+
+        bridgeHandler?.notifyApprovalRequest(requestId, toolCall.command, toolCall.description)
+
+        if (!CommandExecutionService.isWhitelisted(toolCall.command, state.commandWhitelist)) {
+            logger.info(
+                "[CodePlanGUI Approval] blocked by whitelist " +
+                    "requestId=$requestId index=${toolCall.index} command=${toolCall.command.summarizeForLog()}"
+            )
+            val result = ExecutionResult.Blocked(
+                toolCall.command,
+                "'${CommandExecutionService.extractBaseCommand(toolCall.command)}' is not in the allowed command list"
+            )
+            bridgeHandler?.notifyExecutionStatus(requestId, "blocked", result.toToolResultContent())
+            return CompletedToolCall(toolCall, result)
+        }
+
+        val basePath = project.basePath ?: ""
+        if (CommandExecutionService.hasPathsOutsideWorkspace(toolCall.command, basePath)) {
+            logger.info(
+                "[CodePlanGUI Approval] blocked by workspace path check " +
+                    "requestId=$requestId index=${toolCall.index} command=${toolCall.command.summarizeForLog()} " +
+                    "basePath=${basePath.summarizeForLog()}"
+            )
+            val result = ExecutionResult.Blocked(toolCall.command, "Command accesses paths outside the project")
+            bridgeHandler?.notifyExecutionStatus(requestId, "blocked", result.toToolResultContent())
+            return CompletedToolCall(toolCall, result)
+        }
+
+        val future = CompletableFuture<Boolean>()
+        pendingApprovals[requestId] = future
+        bridgeHandler?.notifyExecutionStatus(requestId, "waiting", "{}")
+        logger.info("[CodePlanGUI Approval] waiting for user decision requestId=$requestId index=${toolCall.index}")
+
+        val approved = try {
+            withContext(Dispatchers.IO) { future.get(60, TimeUnit.SECONDS) }
+        } catch (e: Exception) {
+            logger.info(
+                "[CodePlanGUI Approval] decision wait failed " +
+                    "requestId=$requestId index=${toolCall.index} error=${e.javaClass.simpleName}:${e.message ?: ""}"
+            )
+            false
+        } finally {
+            pendingApprovals.remove(requestId)
+        }
+        logger.info(
+            "[CodePlanGUI Approval] resolved user decision " +
+                "requestId=$requestId index=${toolCall.index} approved=$approved"
+        )
+
+        if (!approved) {
+            val result = ExecutionResult.Denied(toolCall.command, "User rejected the command")
+            bridgeHandler?.notifyExecutionStatus(requestId, "denied", result.toToolResultContent())
+            return CompletedToolCall(toolCall, result)
+        }
+
+        bridgeHandler?.notifyExecutionStatus(requestId, "running", "{}")
+        logger.info(
+            "[CodePlanGUI Approval] starting command execution " +
+                "requestId=$requestId index=${toolCall.index} timeoutSeconds=${state.commandTimeoutSeconds} " +
+                "command=${toolCall.command.summarizeForLog()}"
+        )
+        val execService = CommandExecutionService.getInstance(project)
+        val result = execService.executeAsync(toolCall.command, state.commandTimeoutSeconds)
+        val bridgeStatus = if (result is ExecutionResult.TimedOut) "timeout" else "done"
+        bridgeHandler?.notifyExecutionStatus(requestId, bridgeStatus, result.toToolResultContent())
+        logger.info(
+            "[CodePlanGUI Approval] command execution finished " +
+                "requestId=$requestId index=${toolCall.index} bridgeStatus=$bridgeStatus result=${result.summarizeForLog()}"
+        )
+        return CompletedToolCall(toolCall, result)
+    }
+
+    private fun String.summarizeForLog(maxLength: Int = 160): String {
+        val singleLine = replace('\n', ' ').replace('\r', ' ').trim()
+        return if (singleLine.length <= maxLength) singleLine else singleLine.take(maxLength) + "..."
+    }
+
+    private fun ExecutionResult.summarizeForLog(): String = when (this) {
+        is ExecutionResult.Success ->
+            "success exit=$exitCode durationMs=$durationMs stdoutLen=${stdout.length} stderrLen=${stderr.length} truncated=$truncated"
+        is ExecutionResult.Failed ->
+            "failed exit=$exitCode durationMs=$durationMs stdoutLen=${stdout.length} stderrLen=${stderr.length} truncated=$truncated"
+        is ExecutionResult.Blocked ->
+            "blocked reason=${reason.summarizeForLog()}"
+        is ExecutionResult.Denied ->
+            "denied reason=${reason.summarizeForLog()}"
+        is ExecutionResult.TimedOut ->
+            "timeout timeoutSeconds=$timeoutSeconds stdoutLen=${stdout.length}"
+    }
+
     override fun dispose() {
         activeStream?.cancel()
         scope.cancel()
@@ -460,6 +555,20 @@ $selection
         val text: String,
         val includeContext: Boolean,
         val contextLabel: String? = null
+    )
+
+    private data class PreparedToolCall(
+        val index: Int,
+        val id: String,
+        val functionName: String,
+        val argumentsJson: String,
+        val command: String,
+        val description: String
+    )
+
+    private data class CompletedToolCall(
+        val toolCall: PreparedToolCall,
+        val result: ExecutionResult
     )
 }
 

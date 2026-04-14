@@ -5,6 +5,7 @@ package com.github.codeplangui.api
 import com.github.codeplangui.model.Message
 import com.github.codeplangui.model.MessageRole
 import com.github.codeplangui.settings.ProviderConfig
+import com.intellij.openapi.diagnostic.Logger
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -33,7 +34,7 @@ data class FunctionDefinition(
 
 @Serializable
 data class ToolDefinition(
-    val type: String = "function",
+    val type: String,
     val function: FunctionDefinition
 )
 
@@ -79,6 +80,41 @@ sealed class TestResult {
     data class Failure(val message: String) : TestResult()
 }
 
+private const val STREAM_DEBUG_MAX_LENGTH = 1200
+
+internal fun summarizeInterestingSseFrame(id: String?, type: String?, data: String): String? {
+    val normalizedData = data.trim()
+    if (normalizedData == "[DONE]") {
+        return "[CodePlanGUI SSE] id=${id ?: "<null>"} type=${type ?: "<null>"} done raw=[DONE]"
+    }
+
+    val finishReason = SseChunkParser.extractFinishReason(data)
+    val toolCallDeltas = SseChunkParser.extractToolCallChunks(data)
+    if (finishReason == null && toolCallDeltas.isEmpty()) {
+        return null
+    }
+
+    return buildString {
+        append("[CodePlanGUI SSE]")
+        append(" id=").append(id ?: "<null>")
+        append(" type=").append(type ?: "<null>")
+        finishReason?.let { append(" finish_reason=").append(it) }
+        toolCallDeltas.forEach {
+            append(" tool_call[").append(it.index).append("].id=").append(it.id ?: "<null>")
+            append(" tool_call[").append(it.index).append("].name=").append(it.functionName ?: "<null>")
+            append(" tool_call[").append(it.index).append("].args=")
+                .append(truncateForStreamDebug(it.argumentsChunk ?: "<null>"))
+        }
+        append(" raw=").append(truncateForStreamDebug(normalizedData))
+    }
+}
+
+private fun truncateForStreamDebug(value: String): String {
+    val normalized = value.replace("\n", "\\n")
+    return if (normalized.length <= STREAM_DEBUG_MAX_LENGTH) normalized
+    else normalized.take(STREAM_DEBUG_MAX_LENGTH) + "...(truncated)"
+}
+
 class OkHttpSseClient(
     private val streamClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
@@ -100,6 +136,7 @@ class OkHttpSseClient(
     private val json: Json = Json { ignoreUnknownKeys = true; explicitNulls = false },
     private val eventSourceFactory: EventSource.Factory = EventSources.createFactory(streamClient)
 ) {
+    private val logger = Logger.getInstance(OkHttpSseClient::class.java)
 
     fun buildRequest(
         config: ProviderConfig,
@@ -143,16 +180,15 @@ class OkHttpSseClient(
             private var isToolCallStream = false
 
             override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
+                summarizeInterestingSseFrame(id, type, data)?.let(logger::info)
+
+                val toolCallDeltas = SseChunkParser.extractToolCallChunks(data)
+                toolCallDeltas.forEach(onToolCallChunk)
+
                 val finishReason = SseChunkParser.extractFinishReason(data)
                 if (finishReason != null) {
                     onFinishReason(finishReason)
                     if (finishReason == "tool_calls") isToolCallStream = true
-                }
-
-                val toolCallDelta = SseChunkParser.extractToolCallChunk(data)
-                if (toolCallDelta != null) {
-                    onToolCallChunk(toolCallDelta)
-                    return
                 }
 
                 val token = SseChunkParser.extractToken(data)

@@ -22,6 +22,7 @@ export interface Bridge {
   newChat: () => void
   openSettings: () => void
   frontendReady: () => void
+  debugLog: (text: string) => void
   onStart: (msgId: string) => void
   onToken: (token: string) => void
   onEnd: (msgId: string) => void

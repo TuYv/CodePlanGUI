@@ -27,6 +27,10 @@ export interface Message {
   execution?: ExecutionCardData
 }
 
+interface MessageBubbleProps {
+  message: Message
+}
+
 async function copyText(text: string): Promise<boolean> {
   if (navigator.clipboard?.writeText) {
     try {
@@ -74,7 +78,7 @@ function CopyButton({ text }: { text: string }) {
   )
 }
 
-export const MessageBubble = memo(function MessageBubble({ message }: { message: Message }) {
+export const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProps) {
   if (message.role === 'execution' && message.execution) {
     return (
       <div className="message-row message-row-assistant">

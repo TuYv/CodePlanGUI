@@ -15,7 +15,7 @@ IntelliJ IDEA 生态缺少一款轻量插件，允许开发者自由配置符合
   → 右侧 Chat 面板常驻可见
   → 选中代码片段 / 直接输入问题 → 流式回答渲染
   → git commit 时点击 "✨ Generate" → commit message 自动填入
-  （后续版本）输入代码 → Inline 补全出现 → Tab 接受
+  （二阶段）输入代码 → 自动灰字补全出现 → Tab 接受
 ```
 
 核心动作一句话：**在 IDEA 内问自己配好的 AI，不切标签页。**
@@ -57,7 +57,7 @@ IntelliJ IDEA 生态缺少一款轻量插件，允许开发者自由配置符合
 
 ### P1 — 下一版本
 
-- **Inline 代码补全**：防抖（300ms）+ 流式填充，接入 IDEA Lookup/Inlay 机制；复杂度最高，放 P0 验证后再做
+- **Inline 自动灰字补全**：输入代码后自动出现 ghost text 建议，支持 Tab 接受；需要防抖（300ms）+ 流式填充 + 光标变化取消，接入 IDEA Lookup/Inlay 机制。该项是二阶段技术风险最高的一条线，单独设计，不与普通 Chat 交互混做
 - **会话历史**：本地持久化历史记录，支持搜索和恢复（参考 claw-code Session 结构）
 - **多 Provider 快速切换**：状态栏 dropdown 一键切换（参考 jetbrains-cc-gui cc-switch 设计）
 - **代码插入**：Chat 回答中的代码块可一键插入光标位置
@@ -181,6 +181,7 @@ IDEA 主界面
 1. **JCEF 而非原生 Swing**：Chat 界面用 Markdown、代码高亮、流式渲染，原生 Swing 实现成本极高；JCEF 可复用 jetbrains-cc-gui 的前端设计风格。
 2. **不做独立 bridge 进程**：jetbrains-cc-gui 需要 bridge 是因为要管理 Claude Code CLI 子进程；本产品是纯 HTTP API 调用，Plugin 内直接做，减少进程管理复杂度。
 3. **多 Provider 优先于多功能**：核心价值是"自由配 endpoint"，所以 Provider 管理 UI 是第一优先级，比 inline 补全更重要。
+4. **Inline 补全单独成线**：自动灰字补全属于编辑器原生能力，不等同于 Chat 续写；后续设计时需单独处理触发、取消、接受、延迟和误触发问题。
 
 ---
 

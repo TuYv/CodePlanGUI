@@ -112,17 +112,20 @@ Acceptance:
 **Phase 2 — IDE-Native Productivity**
 
 User-visible outcomes:
+- IDE-native inline completion with automatic ghost-text suggestions
 - Conversation history with restore and search
 - One-click code insertion from chat with predictable undo behavior
 - Better commit message generation based on the actual selected commit scope
 - Faster provider switching from the IDE surface
 
 Engineering foundations:
+- Editor event listening, debounce/cancel flow, and inlay rendering for low-latency completion
 - Local session persistence and retrieval model
 - Shared context-summary pipeline for file, selection, and commit-change scopes
 - Reusable action entry points shared by tool window, editor actions, and commit UI
 
 Acceptance:
+- Inline suggestions appear automatically, can be accepted with a single action, and cancel cleanly on cursor/context change
 - Users can restore previous conversations reliably
 - Commit generation reflects the selected change scope instead of a generic diff
 - Code insertion and provider switching behave consistently across IDE restarts
@@ -281,17 +284,20 @@ JAVA_HOME=/path/to/jdk17 ./gradlew buildWebview runIde
 **Phase 2 — IDE 原生提效层**
 
 用户可见结果：
+- IDE 原生的自动灰字补全
 - 会话历史与恢复、搜索
 - 一键把 Chat 中的代码插入编辑器，并且撤销行为可预期
 - Commit Message 生成基于实际选中的提交范围，而不是泛化 diff
 - 更快的 Provider 切换入口
 
 工程支撑：
+- 面向编辑器输入监听、去抖/取消、Inlay 渲染的低延迟补全链路
 - 本地会话持久化与恢复模型
 - 面向文件、选区、提交变更范围的统一上下文摘要能力
 - Tool Window、编辑器动作、提交面板复用同一套动作入口
 
 验收标准：
+- 灰字建议自动出现，可单步接受，并在光标或上下文变化时正确取消
 - 用户能稳定恢复历史会话
 - Commit Message 与实际勾选变更范围一致
 - 代码插入和 Provider 切换在 IDE 重启后仍保持一致行为

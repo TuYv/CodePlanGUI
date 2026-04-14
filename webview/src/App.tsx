@@ -9,6 +9,7 @@ import { ProviderBar } from './components/ProviderBar'
 import type { ExecutionCardData, ExecutionStatus } from './components/ExecutionCard'
 import { getComposerReadiness } from './composerState'
 import { getContextToggleMeta } from './contextState'
+import { parseExecutionResultPayload, stringifyExecutionResultPayload } from './executionStatus'
 import { useBridge } from './hooks/useBridge'
 import { prepareSendPayload } from './sendState'
 import { applyBridgeStatus, applyContextFile } from './statusState'
@@ -93,7 +94,14 @@ export default function App() {
     setStatus(prev => applyBridgeStatus(prev, nextStatus))
   }, [])
 
+  const emitFrontendDebugLog = useCallback((message: string) => {
+    window.__bridge?.debugLog(message)
+  }, [])
+
   const onApprovalRequest = useCallback((requestId: string, command: string, description: string) => {
+    emitFrontendDebugLog(
+      `[approval-ui] received approval request requestId=${requestId} command=${command} description=${description}`,
+    )
     setApprovalRequestId(requestId)
     setApprovalCommand(command)
     setApprovalDescription(description)
@@ -105,14 +113,16 @@ export default function App() {
         role: 'execution' as const,
         content: '',
         execution: { requestId, command, status: 'waiting' as ExecutionStatus },
-      },
+        },
     ])
-  }, [])
+  }, [emitFrontendDebugLog])
 
   const onExecutionStatus = useCallback((requestId: string, status: string, resultJson: string) => {
-    const result = (() => {
-      try { return JSON.parse(resultJson) } catch { return undefined }
-    })()
+    const rawResult = stringifyExecutionResultPayload(resultJson)
+    emitFrontendDebugLog(
+      `[approval-ui] received execution status requestId=${requestId} status=${status} result=${rawResult.slice(0, 240)}`,
+    )
+    const result = parseExecutionResultPayload(resultJson)
     setMessages((prev) =>
       prev.map((msg) =>
         msg.id === requestId
@@ -120,17 +130,19 @@ export default function App() {
           : msg
       )
     )
-  }, [])
+  }, [emitFrontendDebugLog])
 
   const handleApprovalAllow = useCallback(() => {
+    emitFrontendDebugLog(`[approval-ui] modal allow clicked requestId=${approvalRequestId}`)
     setApprovalOpen(false)
     window.__bridge?.approvalResponse(approvalRequestId, 'allow')
-  }, [approvalRequestId])
+  }, [approvalRequestId, emitFrontendDebugLog])
 
   const handleApprovalDeny = useCallback(() => {
+    emitFrontendDebugLog(`[approval-ui] modal deny clicked requestId=${approvalRequestId}`)
     setApprovalOpen(false)
     window.__bridge?.approvalResponse(approvalRequestId, 'deny')
-  }, [approvalRequestId])
+  }, [approvalRequestId, emitFrontendDebugLog])
 
   // Build theme algorithm for Ant Design
   const themeAlgorithm = themeMode === 'dark' ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm

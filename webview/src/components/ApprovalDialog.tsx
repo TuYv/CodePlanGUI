@@ -13,6 +13,7 @@ export function ApprovalDialog({ open, command, description, onAllow, onDeny }: 
   return (
     <Modal
       open={open}
+      getContainer={false}
       title={<span><WarningOutlined style={{ color: '#faad14', marginRight: 8 }} />AI 请求执行命令</span>}
       footer={[
         <Button key="deny" onClick={onDeny}>拒绝</Button>,

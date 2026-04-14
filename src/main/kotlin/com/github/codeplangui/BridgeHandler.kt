@@ -27,6 +27,7 @@ internal interface BridgeCommands {
     fun openSettings()
     fun onFrontendReady()
     fun approvalResponse(requestId: String, decision: String)
+    fun debugLog(text: String)
 }
 
 internal fun dispatchBridgeRequest(
@@ -43,6 +44,7 @@ internal fun dispatchBridgeRequest(
         "openSettings"     -> commands.openSettings()
         "frontendReady"    -> commands.onFrontendReady()
         "approvalResponse" -> commands.approvalResponse(requestId, decision)
+        "debugLog"         -> commands.debugLog(text)
     }
 }
 
@@ -112,7 +114,12 @@ class BridgeHandler(
                     }
 
                     override fun approvalResponse(requestId: String, decision: String) {
+                        logger.info("[CodePlanGUI Bridge] frontend->ide approvalResponse requestId=$requestId decision=$decision")
                         chatService.onApprovalResponse(requestId, decision)
+                    }
+
+                    override fun debugLog(text: String) {
+                        logger.info("[CodePlanGUI Frontend] $text")
                     }
                 })) {
                 BridgePayloadHandlingResult.Success -> null
@@ -150,6 +157,9 @@ class BridgeHandler(
                             },
                             approvalResponse: function(requestId, decision) {
                                 ${sendQuery.inject("""JSON.stringify({type:'approvalResponse',text:'',requestId:requestId,decision:decision})""")}
+                            },
+                            debugLog: function(text) {
+                                ${sendQuery.inject("""JSON.stringify({type:'debugLog',text:text})""")}
                             },
                             onStart: function(msgId) {},
                             onToken: function(token) {},
@@ -192,15 +202,25 @@ class BridgeHandler(
             "${json.encodeToString(requestId)}," +
             "${json.encodeToString(command)}," +
             "${json.encodeToString(description)})"
-        )
+        ).also {
+            logger.info(
+                "[CodePlanGUI Bridge] ide->frontend approvalRequest " +
+                    "requestId=$requestId command=${command.summarizeForLog()} description=${description.summarizeForLog()}"
+            )
+        }
 
     fun notifyExecutionStatus(requestId: String, status: String, resultJson: String) =
         pushJS(
             "window.__bridge.onExecutionStatus(" +
             "${json.encodeToString(requestId)}," +
             "${json.encodeToString(status)}," +
-            "$resultJson)"
-        )
+            "${json.encodeToString(resultJson)})"
+        ).also {
+            logger.info(
+                "[CodePlanGUI Bridge] ide->frontend executionStatus " +
+                    "requestId=$requestId status=$status result=${resultJson.summarizeForLog(240)}"
+            )
+        }
 
     private fun pushJS(js: String) {
         if (!isReady) return
@@ -210,4 +230,9 @@ class BridgeHandler(
     }
 
     private fun String.quoted() = "'${replace("'", "\\'")}'"
+
+    private fun String.summarizeForLog(maxLength: Int = 120): String {
+        val singleLine = replace('\n', ' ').replace('\r', ' ').trim()
+        return if (singleLine.length <= maxLength) singleLine else singleLine.take(maxLength) + "..."
+    }
 }

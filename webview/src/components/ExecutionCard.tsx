@@ -27,6 +27,10 @@ export interface ExecutionCardData {
   }
 }
 
+interface ExecutionCardProps {
+  data: ExecutionCardData
+}
+
 const PREVIEW_LINES = 5
 
 function OutputBlock({ text, label }: { text: string; label: string }) {
@@ -62,7 +66,7 @@ function OutputBlock({ text, label }: { text: string; label: string }) {
   )
 }
 
-export function ExecutionCard({ data }: { data: ExecutionCardData }) {
+export function ExecutionCard({ data }: ExecutionCardProps) {
   const { command, status, result } = data
 
   const header = () => {

@@ -2,11 +2,13 @@ package com.github.codeplangui.api
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 data class ToolCallDelta(
+    val index: Int,
     val id: String?,            // non-null only on the first chunk
     val functionName: String?,  // non-null only on the first chunk
     val argumentsChunk: String?
@@ -44,7 +46,15 @@ object SseChunkParser {
      * Returns null if the chunk is a regular text delta or is unparseable.
      */
     fun extractToolCallChunk(data: String): ToolCallDelta? {
-        if (data.trim() == "[DONE]") return null
+        return extractToolCallChunks(data).firstOrNull()
+    }
+
+    /**
+     * Extracts all tool_call deltas from a streaming SSE chunk.
+     * Returns an empty list if the chunk is a regular text delta or is unparseable.
+     */
+    fun extractToolCallChunks(data: String): List<ToolCallDelta> {
+        if (data.trim() == "[DONE]") return emptyList()
         return try {
             val obj = json.parseToJsonElement(data).jsonObject
             val toolCallsArray = obj["choices"]
@@ -55,18 +65,30 @@ object SseChunkParser {
                 ?.jsonObject
                 ?.get("tool_calls")
                 ?.jsonArray
-                ?: return null
+                ?: return emptyList()
 
-            val first = toolCallsArray.firstOrNull()?.jsonObject ?: return null
-            val func = first["function"]?.jsonObject
+            toolCallsArray.mapNotNull { element ->
+                val toolCall = element.jsonObject
+                val func = toolCall["function"]?.jsonObject
 
-            ToolCallDelta(
-                id = first["id"]?.jsonPrimitive?.contentOrNull,
-                functionName = func?.get("name")?.jsonPrimitive?.contentOrNull,
-                argumentsChunk = func?.get("arguments")?.jsonPrimitive?.contentOrNull
-            )
+                // `arguments` may be a JSON string (streaming chunks) or an already-parsed
+                // JSON object (some providers return it pre-parsed). Handle both forms.
+                val argsElement = func?.get("arguments")
+                val argsChunk = when (argsElement) {
+                    null -> null
+                    is kotlinx.serialization.json.JsonPrimitive -> argsElement.contentOrNull
+                    else -> argsElement.toString()
+                }
+
+                ToolCallDelta(
+                    index = toolCall["index"]?.jsonPrimitive?.intOrNull ?: 0,
+                    id = toolCall["id"]?.jsonPrimitive?.contentOrNull,
+                    functionName = func?.get("name")?.jsonPrimitive?.contentOrNull,
+                    argumentsChunk = argsChunk
+                )
+            }
         } catch (_: Exception) {
-            null
+            emptyList()
         }
     }
 

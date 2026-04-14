@@ -4,6 +4,7 @@ import com.github.codeplangui.api.FunctionDefinition
 import com.github.codeplangui.api.OkHttpSseClient
 import com.github.codeplangui.api.TestResult
 import com.github.codeplangui.api.ToolDefinition
+import com.github.codeplangui.api.summarizeInterestingSseFrame
 import com.github.codeplangui.model.Message
 import com.github.codeplangui.model.MessageRole
 import com.github.codeplangui.settings.ProviderConfig
@@ -213,6 +214,90 @@ class OkHttpSseClientTest {
         assertEquals("HTTP 404：endpoint 路径不正确（应包含 /v1）", error)
     }
 
+    @Test
+    fun `streamChat processes tool delta before tool_calls finish reason in the same chunk`() {
+        val factory = FakeEventSourceFactory()
+        val client = OkHttpSseClient(eventSourceFactory = factory)
+        val callbackOrder = mutableListOf<String>()
+        var observedFinishReason: String? = null
+        var observedToolCall: com.github.codeplangui.api.ToolCallDelta? = null
+
+        val source = client.streamChat(
+            request = simpleRequest(),
+            onToken = {},
+            onEnd = {},
+            onError = {},
+            onToolCallChunk = {
+                callbackOrder += "tool"
+                observedToolCall = it
+            },
+            onFinishReason = {
+                callbackOrder += "finish"
+                observedFinishReason = it
+            }
+        )
+
+        factory.listener.onEvent(
+            source,
+            null,
+            null,
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"run_command","arguments":"{\"command\":\"ls -la\"}"}}]},"finish_reason":"tool_calls"}]}"""
+        )
+
+        assertEquals(listOf("tool", "finish"), callbackOrder)
+        assertEquals("tool_calls", observedFinishReason)
+        assertEquals("call_1", observedToolCall?.id)
+    }
+
+    @Test
+    fun `streamChat emits each tool call delta before finish reason when a chunk contains multiple tool calls`() {
+        val factory = FakeEventSourceFactory()
+        val client = OkHttpSseClient(eventSourceFactory = factory)
+        val callbackOrder = mutableListOf<String>()
+        val observedToolCalls = mutableListOf<com.github.codeplangui.api.ToolCallDelta>()
+        var observedFinishReason: String? = null
+
+        val source = client.streamChat(
+            request = simpleRequest(),
+            onToken = {},
+            onEnd = {},
+            onError = {},
+            onToolCallChunk = {
+                callbackOrder += "tool:${it.index}"
+                observedToolCalls += it
+            },
+            onFinishReason = {
+                callbackOrder += "finish"
+                observedFinishReason = it
+            }
+        )
+
+        factory.listener.onEvent(
+            source,
+            null,
+            null,
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"run_command","arguments":"{\"command\":\"ls -la\"}"}},{"index":1,"id":"call_2","function":{"name":"run_command","arguments":"{\"command\":\"pwd\"}"}}]},"finish_reason":"tool_calls"}]}"""
+        )
+
+        assertEquals(listOf("tool:0", "tool:1", "finish"), callbackOrder)
+        assertEquals("tool_calls", observedFinishReason)
+        assertEquals(listOf("call_1", "call_2"), observedToolCalls.map { it.id })
+    }
+
+    @Test
+    fun `summarizeInterestingSseFrame includes tool call and finish reason details`() {
+        val summary = summarizeInterestingSseFrame(
+            id = null,
+            type = null,
+            data = """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"run_command","arguments":"{\"command\":\"ls -la\"}"}}]},"finish_reason":"tool_calls"}]}"""
+        ) ?: error("expected debug summary")
+
+        assertTrue(summary.contains("finish_reason=tool_calls"))
+        assertTrue(summary.contains("tool_call[0].id=call_1"))
+        assertTrue(summary.contains("tool_call[0].name=run_command"))
+        assertTrue(summary.contains("raw={\"choices\""))
+    }
+
     private fun providerConfig() = ProviderConfig(
         id = "provider-1",
         name = "OpenAI",
@@ -298,5 +383,6 @@ class OkHttpSseClientTest {
         }
         assertTrue(body.contains("\"tools\""), "body should contain tools array")
         assertTrue(body.contains("run_command"), "body should contain tool name")
+        assertTrue(body.contains("\"type\":\"function\""), "tool definition must include type field")
     }
 }

@@ -8,5 +8,12 @@
     "lib": ["ES2022"],
     "allowImportingTsExtensions": false
   },
-  "include": ["src/sendState.ts", "src/statusState.ts", "src/composerState.ts", "src/contextState.ts"]
+  "include": [
+    "src/sendState.ts",
+    "src/statusState.ts",
+    "src/composerState.ts",
+    "src/contextState.ts",
+    "src/executionStatus.ts",
+    "src/components/ExecutionCard.tsx"
+  ]
 }

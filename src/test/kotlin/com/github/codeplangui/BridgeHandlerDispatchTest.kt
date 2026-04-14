@@ -52,6 +52,8 @@ class BridgeHandlerDispatchTest {
                 override fun onFrontendReady() = Unit
 
                 override fun approvalResponse(requestId: String, decision: String) = Unit
+
+                override fun debugLog(text: String) = Unit
             }
         )
 
@@ -75,10 +77,25 @@ class BridgeHandlerDispatchTest {
         assertEquals(listOf(Pair("req-123", "allow")), commands.approvalResponses)
     }
 
+    @Test
+    fun `dispatchBridgeRequest routes debugLog`() {
+        val commands = RecordingBridgeCommands()
+
+        dispatchBridgeRequest(
+            type = "debugLog",
+            text = "approval modal allow clicked",
+            includeContext = false,
+            commands = commands
+        )
+
+        assertEquals(listOf("approval modal allow clicked"), commands.debugLogs)
+    }
+
     private class RecordingBridgeCommands : BridgeCommands {
         val sentMessages = mutableListOf<SentMessage>()
         var frontendReadyCalls: Int = 0
         val approvalResponses = mutableListOf<Pair<String, String>>()
+        val debugLogs = mutableListOf<String>()
 
         override fun sendMessage(text: String, includeContext: Boolean) {
             sentMessages += SentMessage(text, includeContext)
@@ -94,6 +111,10 @@ class BridgeHandlerDispatchTest {
 
         override fun approvalResponse(requestId: String, decision: String) {
             approvalResponses += Pair(requestId, decision)
+        }
+
+        override fun debugLog(text: String) {
+            debugLogs += text
         }
     }
 }

@@ -169,7 +169,8 @@ class BridgeHandler(
                             onContextFile: function(fileName) {},
                             onTheme: function(theme) {},
                             onApprovalRequest: function(requestId, command, description) {},
-                            onExecutionStatus: function(requestId, status, result) {}
+                            onExecutionStatus: function(requestId, status, result) {},
+                            onRestoreMessages: function(messages) {}
                         };
                         document.dispatchEvent(new Event('bridge_ready'));
                     """.trimIndent()
@@ -221,6 +222,9 @@ class BridgeHandler(
                     "requestId=$requestId status=$status result=${resultJson.summarizeForLog(240)}"
             )
         }
+
+    fun notifyRestoreMessages(messages: String) =
+        pushJS("window.__bridge.onRestoreMessages(${json.encodeToString(messages)})")
 
     private fun pushJS(js: String) {
         if (!isReady) return

@@ -144,10 +144,43 @@ export default function App() {
     window.__bridge?.approvalResponse(approvalRequestId, 'deny')
   }, [approvalRequestId, emitFrontendDebugLog])
 
+  const onRestoreMessages = useCallback((messagesJson: string) => {
+    try {
+      const restored = JSON.parse(messagesJson) as Array<{ id: string; role: string; content: string }>
+      setMessages(restored.flatMap((message) => {
+        if (message.role !== 'user' && message.role !== 'assistant') {
+          return []
+        }
+        if (message.role === 'assistant' && message.content.trim().length === 0) {
+          return []
+        }
+        return [{
+          id: message.id,
+          role: message.role,
+          content: message.content,
+          isStreaming: false,
+        }]
+      }))
+    } catch {
+      // ignore malformed restore data
+    }
+  }, [])
+
   // Build theme algorithm for Ant Design
   const themeAlgorithm = themeMode === 'dark' ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm
 
-  const bridgeReady = useBridge({ onStart, onToken, onEnd, onError, onStatus, onContextFile, onTheme, onApprovalRequest, onExecutionStatus })
+  const bridgeReady = useBridge({
+    onStart,
+    onToken,
+    onEnd,
+    onError,
+    onStatus,
+    onContextFile,
+    onTheme,
+    onApprovalRequest,
+    onExecutionStatus,
+    onRestoreMessages,
+  })
   const composerReadiness = getComposerReadiness({
     inputText,
     isLoading,

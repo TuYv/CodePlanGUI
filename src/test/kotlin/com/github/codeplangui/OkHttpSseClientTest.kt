@@ -298,6 +298,188 @@ class OkHttpSseClientTest {
         assertTrue(summary.contains("raw={\"choices\""))
     }
 
+    // region parseBodyError tests
+
+    @Test
+    fun `parseBodyError detects GLM style error in 200 response`() {
+        val client = OkHttpSseClient()
+        val body = """{"code": 500, "msg": "404 NOT_FOUND", "success": false}"""
+        val method = OkHttpSseClient::class.java.getDeclaredMethod("parseBodyError", String::class.java)
+        method.isAccessible = true
+        val result = method.invoke(client, body) as String?
+
+        assertTrue(result != null)
+        assertTrue(result!!.contains("404 NOT_FOUND"))
+        assertTrue(result.contains("请检查 endpoint 路径是否正确"))
+    }
+
+    @Test
+    fun `parseBodyError detects OpenAI style error in 200 response`() {
+        val client = OkHttpSseClient()
+        val body = """{"error": {"message": "invalid api key"}}"""
+        val method = OkHttpSseClient::class.java.getDeclaredMethod("parseBodyError", String::class.java)
+        method.isAccessible = true
+        val result = method.invoke(client, body) as String?
+
+        assertTrue(result != null)
+        assertTrue(result!!.contains("invalid api key"))
+        assertTrue(result.contains("请检查 API Key 是否正确"))
+    }
+
+    @Test
+    fun `parseBodyError adds quota guidance for billing errors`() {
+        val client = OkHttpSseClient()
+        val body = """{"code": 402, "msg": "余额不足", "success": false}"""
+        val method = OkHttpSseClient::class.java.getDeclaredMethod("parseBodyError", String::class.java)
+        method.isAccessible = true
+        val result = method.invoke(client, body) as String?
+
+        assertTrue(result != null)
+        assertTrue(result!!.contains("余额不足"))
+        assertTrue(result.contains("请检查账户余额或配额是否充足"))
+    }
+
+    @Test
+    fun `parseBodyError adds retry guidance for busy errors`() {
+        val client = OkHttpSseClient()
+        val body = """{"error": {"message": "服务繁忙，请稍后重试"}}"""
+        val method = OkHttpSseClient::class.java.getDeclaredMethod("parseBodyError", String::class.java)
+        method.isAccessible = true
+        val result = method.invoke(client, body) as String?
+
+        assertTrue(result != null)
+        assertTrue(result!!.contains("服务繁忙"))
+        assertTrue(result.contains("请稍后重试"))
+    }
+
+    @Test
+    fun `parseBodyError adds model guidance for model errors`() {
+        val client = OkHttpSseClient()
+        val body = """{"error": {"message": "model not found"}}"""
+        val method = OkHttpSseClient::class.java.getDeclaredMethod("parseBodyError", String::class.java)
+        method.isAccessible = true
+        val result = method.invoke(client, body) as String?
+
+        assertTrue(result != null)
+        assertTrue(result!!.contains("model not found"))
+        assertTrue(result.contains("请检查模型名称是否正确"))
+    }
+
+    @Test
+    fun `parseBodyError returns null for successful response`() {
+        val client = OkHttpSseClient()
+        val body = """{"choices":[{"message":{"content":"hello"}}]}"""
+        val method = OkHttpSseClient::class.java.getDeclaredMethod("parseBodyError", String::class.java)
+        method.isAccessible = true
+        val result = method.invoke(client, body) as String?
+
+        assertNull(result)
+    }
+
+    @Test
+    fun `testConnection detects body error despite 200 status`() {
+        val client = OkHttpSseClient(
+            syncClient = syncClientFor(
+                responseCode = 200,
+                responseBody = """{"code": 500, "msg": "404 NOT_FOUND", "success": false}"""
+            )
+        )
+
+        val result = client.testConnection(providerConfig(), "secret-key")
+
+        assertTrue(result is TestResult.Failure)
+        assertTrue((result as TestResult.Failure).message.contains("404 NOT_FOUND"))
+    }
+
+    // endregion
+
+    // region retry tests
+
+    @Test
+    fun `callSync retries on 429 status`() {
+        var attemptCount = 0
+        val client = OkHttpSseClient(
+            syncClient = OkHttpClient.Builder()
+                .addInterceptor { chain ->
+                    attemptCount++
+                    if (attemptCount < 3) {
+                        responseFor(chain.request(), 429, "too many requests")
+                    } else {
+                        responseFor(chain.request(), 200, """{"choices":[{"message":{"content":"success"}}]}""")
+                    }
+                }
+                .build()
+        )
+
+        val result = client.callSync(simpleRequest())
+
+        assertEquals("success", result.getOrThrow())
+        assertEquals(3, attemptCount)
+    }
+
+    @Test
+    fun `callSync retries on 5xx status`() {
+        var attemptCount = 0
+        val client = OkHttpSseClient(
+            syncClient = OkHttpClient.Builder()
+                .addInterceptor { chain ->
+                    attemptCount++
+                    if (attemptCount < 2) {
+                        responseFor(chain.request(), 503, "service unavailable")
+                    } else {
+                        responseFor(chain.request(), 200, """{"choices":[{"message":{"content":"success"}}]}""")
+                    }
+                }
+                .build()
+        )
+
+        val result = client.callSync(simpleRequest())
+
+        assertEquals("success", result.getOrThrow())
+        assertEquals(2, attemptCount)
+    }
+
+    @Test
+    fun `callSync retries on SocketTimeoutException`() {
+        var attemptCount = 0
+        val client = OkHttpSseClient(
+            syncClient = OkHttpClient.Builder()
+                .addInterceptor { _ ->
+                    attemptCount++
+                    if (attemptCount < 3) {
+                        throw SocketTimeoutException("timeout")
+                    } else {
+                        throw SocketTimeoutException("timeout") // Still fail after max attempts
+                    }
+                }
+                .build()
+        )
+
+        val result = client.callSync(simpleRequest())
+
+        assertTrue(result.isFailure)
+        assertEquals(3, attemptCount)
+    }
+
+    @Test
+    fun `callSync does not retry on 401`() {
+        var attemptCount = 0
+        val client = OkHttpSseClient(
+            syncClient = OkHttpClient.Builder()
+                .addInterceptor { chain ->
+                    attemptCount++
+                    responseFor(chain.request(), 401, "unauthorized")
+                }
+                .build()
+        )
+
+        val result = client.callSync(simpleRequest())
+
+        assertTrue(result.isFailure)
+        assertEquals(1, attemptCount)
+    }
+
+    // endregion
     private fun providerConfig() = ProviderConfig(
         id = "provider-1",
         name = "OpenAI",

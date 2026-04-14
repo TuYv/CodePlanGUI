@@ -25,6 +25,7 @@ data class SettingsState(
     var commitFormat: String = "conventional",
     var contextInjectionEnabled: Boolean = true,
     var contextMaxLines: Int = 300,
+    var memoryText: String = "",
     var commandExecutionEnabled: Boolean = false,
     var commandWhitelist: MutableList<String> = mutableListOf(
         "cargo", "gradle", "mvn", "npm", "yarn", "pnpm",

@@ -15,6 +15,7 @@ import com.github.codeplangui.settings.ApiKeyStore
 import com.github.codeplangui.settings.PluginSettings
 import com.github.codeplangui.settings.PluginSettingsConfigurable
 import com.github.codeplangui.settings.SettingsState
+import com.github.codeplangui.storage.SessionStore
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.Disposable
@@ -47,7 +48,7 @@ class ChatService(private val project: Project) : Disposable {
     private val logger = Logger.getInstance(ChatService::class.java)
 
     private val client = OkHttpSseClient()
-    private val session = ChatSession()
+    private var session: ChatSession = ChatSession()
     private var activeStream: EventSource? = null
     private var activeMessageId: String? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -55,6 +56,8 @@ class ChatService(private val project: Project) : Disposable {
 
     var bridgeHandler: BridgeHandler? = null
         private set
+
+    private val sessionStore = SessionStore()
 
     private var contextFileCallback: ((String) -> Unit)? = null
     private var onFrontendReadyCallback: (() -> Unit)? = null
@@ -74,6 +77,7 @@ class ChatService(private val project: Project) : Disposable {
     fun onFrontendReady() {
         isFrontendReady = true
         publishStatus()
+        restoreSessionIfNeeded()
         onFrontendReadyCallback?.invoke()
         pendingPrompt?.let { prompt ->
             pendingPrompt = null
@@ -109,9 +113,10 @@ class ChatService(private val project: Project) : Disposable {
             return
         }
 
-        val commandExecutionEnabled = settings.getState().commandExecutionEnabled
+        val settingsState = settings.getState()
+        val commandExecutionEnabled = settingsState.commandExecutionEnabled
 
-        val contextSnapshot = if (includeContext && settings.getState().contextInjectionEnabled) {
+        val contextSnapshot = if (includeContext && settingsState.contextInjectionEnabled) {
             capturePromptContextSnapshot()
         } else {
             null
@@ -119,10 +124,18 @@ class ChatService(private val project: Project) : Disposable {
         contextFileCallback?.invoke(resolveUiContextLabel(contextLabelOverride, contextSnapshot))
         val systemContent = formatSystemContent(
             base = buildBaseSystemPrompt(commandExecutionEnabled),
-            snapshot = contextSnapshot
+            snapshot = contextSnapshot,
+            memoryText = settingsState.memoryText
         )
         session.setSystemMessage(systemContent)
-        session.add(Message(MessageRole.USER, text))
+        val userMsg = Message(
+            role = MessageRole.USER,
+            content = text,
+            id = UUID.randomUUID().toString(),
+            seq = session.nextSeq()
+        )
+        session.add(userMsg)
+        persistSession()
 
         // Reset state machine before each new user-initiated request
         resetToolCallState()
@@ -135,8 +148,8 @@ class ChatService(private val project: Project) : Disposable {
             config = provider,
             apiKey = apiKey,
             messages = session.getApiMessages(),
-            temperature = settings.getState().chatTemperature,
-            maxTokens = settings.getState().chatMaxTokens,
+            temperature = settingsState.chatTemperature,
+            maxTokens = settingsState.chatMaxTokens,
             stream = true,
             tools = if (commandExecutionEnabled) listOf(runCommandToolDefinition()) else null
         )
@@ -150,7 +163,10 @@ class ChatService(private val project: Project) : Disposable {
         activeStream = null
         activeMessageId = null
         resetToolCallState()
-        session.clear()
+        session = ChatSession()
+        pendingApprovals.values.forEach { it.complete(false) }
+        pendingApprovals.clear()
+        sessionStore.clearSession()
         contextFileCallback?.invoke("")
         publishStatus()
     }
@@ -251,6 +267,8 @@ class ChatService(private val project: Project) : Disposable {
         session.add(Message(
             role = MessageRole.ASSISTANT,
             content = responseBuffer.toString(),
+            id = UUID.randomUUID().toString(),
+            seq = session.nextSeq(),
             toolCalls = completedToolCalls.map {
                 ToolCallRecord(
                     id = it.toolCall.id,
@@ -263,9 +281,12 @@ class ChatService(private val project: Project) : Disposable {
             session.add(Message(
                 role = MessageRole.TOOL,
                 content = it.result.toToolResultContent(),
-                toolCallId = it.toolCall.id
+                toolCallId = it.toolCall.id,
+                id = UUID.randomUUID().toString(),
+                seq = session.nextSeq()
             ))
         }
+        persistSession()
 
         // Reset state machine
         resetToolCallState()
@@ -361,7 +382,13 @@ $selection
                 onEnd = {
                     if (activeMessageId == msgId) {
                         logger.info("[CodePlanGUI Approval] model round completed msgId=$msgId")
-                        session.add(Message(MessageRole.ASSISTANT, responseBuffer.toString()))
+                        session.add(Message(
+                            role = MessageRole.ASSISTANT,
+                            content = responseBuffer.toString(),
+                            id = UUID.randomUUID().toString(),
+                            seq = session.nextSeq()
+                        ))
+                        persistSession()
                         activeStream = null
                         activeMessageId = null
                         publishStatus()
@@ -399,6 +426,13 @@ $selection
 
     private fun resetToolCallState() {
         toolCallAccumulator.clear()
+    }
+
+    private fun persistSession() {
+        sessionStore.saveSession(
+            session.threadId,
+            session.getMessages().filter { it.role != MessageRole.SYSTEM }
+        )
     }
 
     private fun prepareToolCallsForExecution(msgId: String): List<PreparedToolCall>? {
@@ -544,7 +578,36 @@ $selection
 
     override fun dispose() {
         activeStream?.cancel()
+        pendingApprovals.values.forEach { it.complete(false) }
+        pendingApprovals.clear()
         scope.cancel()
+    }
+
+    private val bridgeJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+
+    private fun restoreSessionIfNeeded() {
+        if (session.getMessages().any { it.role != MessageRole.SYSTEM }) {
+            return
+        }
+        val data = sessionStore.loadSession() ?: return
+        session = ChatSession(data.threadId)
+        data.messages.forEach { session.add(it) }
+        val restoredMessages = data.messages
+            .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT }
+            .filterNot { it.role == MessageRole.ASSISTANT && it.content.isBlank() }
+            .map {
+                RestoredMessagePayload(
+                    id = it.id,
+                    role = it.role.name.lowercase(),
+                    content = it.content
+                )
+            }
+        bridgeHandler?.notifyRestoreMessages(
+            bridgeJson.encodeToString(
+                kotlinx.serialization.builtins.ListSerializer(RestoredMessagePayload.serializer()),
+                restoredMessages
+            )
+        )
     }
 
     companion object {
@@ -569,6 +632,13 @@ $selection
     private data class CompletedToolCall(
         val toolCall: PreparedToolCall,
         val result: ExecutionResult
+    )
+
+    @kotlinx.serialization.Serializable
+    private data class RestoredMessagePayload(
+        val id: String,
+        val role: String,
+        val content: String
     )
 }
 
@@ -641,13 +711,23 @@ internal fun openSettingsOnEdt(
 
 internal fun formatSystemContent(
     base: String,
-    snapshot: PromptContextSnapshot?
+    snapshot: PromptContextSnapshot?,
+    memoryText: String = ""
 ): String {
-    if (snapshot == null) {
-        return base
+    var result = base
+
+    if (memoryText.isNotBlank()) {
+        result = """$result
+
+[User Memory]
+$memoryText"""
     }
 
-    return """$base
+    if (snapshot == null) {
+        return result
+    }
+
+    return """$result
 
 当前文件：${snapshot.fileName}
 ```${snapshot.extension}

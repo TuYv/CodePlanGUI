@@ -9,6 +9,7 @@ data class SettingsFormState(
     var commitFormat: String = "conventional",
     var contextInjectionEnabled: Boolean = true,
     var contextMaxLines: Int = 300,
+    var memoryText: String = "",
     var commandExecutionEnabled: Boolean = false,
     var commandWhitelist: MutableList<String> = mutableListOf(
         "cargo", "gradle", "mvn", "npm", "yarn", "pnpm",
@@ -25,6 +26,7 @@ data class SettingsFormState(
         commitFormat = commitFormat,
         contextInjectionEnabled = contextInjectionEnabled,
         contextMaxLines = contextMaxLines,
+        memoryText = memoryText,
         commandExecutionEnabled = commandExecutionEnabled,
         commandWhitelist = commandWhitelist.toMutableList(),
         commandTimeoutSeconds = commandTimeoutSeconds,
@@ -40,6 +42,7 @@ data class SettingsFormState(
             commitFormat = state.commitFormat,
             contextInjectionEnabled = state.contextInjectionEnabled,
             contextMaxLines = state.contextMaxLines,
+            memoryText = state.memoryText,
             commandExecutionEnabled = state.commandExecutionEnabled,
             commandWhitelist = state.commandWhitelist.toMutableList(),
             commandTimeoutSeconds = state.commandTimeoutSeconds,

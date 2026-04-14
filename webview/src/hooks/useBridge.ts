@@ -11,6 +11,7 @@ interface BridgeCallbacks {
   onTheme: (theme: 'dark' | 'light') => void
   onApprovalRequest: (requestId: string, command: string, description: string) => void
   onExecutionStatus: (requestId: string, status: string, result: string) => void
+  onRestoreMessages: (messages: string) => void
 }
 
 export function useBridge(callbacks: BridgeCallbacks) {
@@ -33,6 +34,7 @@ export function useBridge(callbacks: BridgeCallbacks) {
     window.__bridge.onTheme = callbacks.onTheme
     window.__bridge.onApprovalRequest = callbacks.onApprovalRequest
     window.__bridge.onExecutionStatus = callbacks.onExecutionStatus
+    window.__bridge.onRestoreMessages = callbacks.onRestoreMessages
   }, [callbacks])
 
   useEffect(() => {
@@ -56,6 +58,7 @@ export function useBridge(callbacks: BridgeCallbacks) {
           approvalResponse: () => {},
           onApprovalRequest: currentCallbacks.onApprovalRequest,
           onExecutionStatus: currentCallbacks.onExecutionStatus,
+          onRestoreMessages: currentCallbacks.onRestoreMessages,
         }
       } else {
         window.__bridge.onStart = currentCallbacks.onStart
@@ -67,6 +70,7 @@ export function useBridge(callbacks: BridgeCallbacks) {
         window.__bridge.onTheme = currentCallbacks.onTheme
         window.__bridge.onApprovalRequest = currentCallbacks.onApprovalRequest
         window.__bridge.onExecutionStatus = currentCallbacks.onExecutionStatus
+        window.__bridge.onRestoreMessages = currentCallbacks.onRestoreMessages
       }
 
       const isReady = window.__bridge.isReady === true

@@ -18,8 +18,7 @@ class CommandExecutionService(private val project: Project) {
             ?: return@withContext ExecutionResult.Blocked(command, "Project path unavailable")
         val startMs = System.currentTimeMillis()
 
-        val process = ProcessBuilder("sh", "-c", command)
-            .directory(File(basePath))
+        val process = ShellPlatform.current().buildProcess(command, File(basePath))
             .redirectErrorStream(false)
             .start()
 
@@ -68,8 +67,7 @@ class CommandExecutionService(private val project: Project) {
             ?: return@withContext ExecutionResult.Blocked(command, "Project path unavailable")
         val startMs = System.currentTimeMillis()
 
-        val process = ProcessBuilder("sh", "-c", command)
-            .directory(File(basePath))
+        val process = ShellPlatform.current().buildProcess(command, File(basePath))
             .redirectErrorStream(false)
             .start()
 
@@ -131,11 +129,8 @@ class CommandExecutionService(private val project: Project) {
     }
 
     companion object {
-        fun extractBaseCommand(command: String): String {
-            val stripped = command.trimStart()
-            val base = stripped.split(" ", "|", ";", ">", "<", "&").first().trim()
-            return base.substringAfterLast('/')
-        }
+        fun extractBaseCommand(command: String): String =
+            ShellPlatform.current().extractBaseCommand(command)
 
         fun isWhitelisted(command: String, whitelist: List<String>): Boolean {
             if (whitelist.isEmpty()) return false
@@ -143,16 +138,8 @@ class CommandExecutionService(private val project: Project) {
             return whitelist.any { it == base }
         }
 
-        fun hasPathsOutsideWorkspace(command: String, basePath: String): Boolean {
-            val tokens = command.split("\\s+".toRegex())
-            val home = System.getProperty("user.home") ?: ""
-            return tokens.any { token ->
-                if (token.startsWith('-')) return@any false
-                val expanded = if (token.startsWith("~/")) home + token.drop(1) else token
-                if (!expanded.startsWith('/')) return@any false
-                !expanded.startsWith(basePath)
-            }
-        }
+        fun hasPathsOutsideWorkspace(command: String, basePath: String): Boolean =
+            ShellPlatform.current().hasPathsOutsideWorkspace(command, basePath)
 
         fun truncateOutput(text: String, maxChars: Int): String =
             if (text.length <= maxChars) text else text.take(maxChars)

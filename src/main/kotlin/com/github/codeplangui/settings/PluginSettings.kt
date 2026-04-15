@@ -1,5 +1,6 @@
 package com.github.codeplangui.settings
 
+import com.github.codeplangui.execution.ShellPlatform
 import com.intellij.openapi.components.PersistentStateComponent
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.State
@@ -30,10 +31,7 @@ data class SettingsState(
     var contextMaxLines: Int = 300,
     var memoryText: String = "",
     var commandExecutionEnabled: Boolean = false,
-    var commandWhitelist: MutableList<String> = mutableListOf(
-        "cargo", "gradle", "mvn", "npm", "yarn", "pnpm",
-        "git", "ls", "cat", "grep", "find", "echo", "pwd"
-    ),
+    var commandWhitelist: MutableList<String> = ShellPlatform.current().defaultWhitelist().toMutableList(),
     var commandTimeoutSeconds: Int = 30
 )
 

@@ -1,5 +1,7 @@
 package com.github.codeplangui.settings
 
+import com.github.codeplangui.execution.ShellPlatform
+
 data class SettingsFormState(
     var providers: MutableList<ProviderConfig> = mutableListOf(),
     var activeProviderId: String? = null,
@@ -14,10 +16,7 @@ data class SettingsFormState(
     var contextMaxLines: Int = 300,
     var memoryText: String = "",
     var commandExecutionEnabled: Boolean = false,
-    var commandWhitelist: MutableList<String> = mutableListOf(
-        "cargo", "gradle", "mvn", "npm", "yarn", "pnpm",
-        "git", "ls", "cat", "grep", "find", "echo", "pwd"
-    ),
+    var commandWhitelist: MutableList<String> = ShellPlatform.current().defaultWhitelist().toMutableList(),
     var commandTimeoutSeconds: Int = 30
 ) {
     fun toSettingsState(): SettingsState = SettingsState(

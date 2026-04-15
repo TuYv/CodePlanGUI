@@ -65,6 +65,7 @@ class ChatService(private val project: Project) : Disposable {
 
     // Approval gate: suspended coroutines wait on these futures
     private val pendingApprovals = ConcurrentHashMap<String, CompletableFuture<Boolean>>()
+    private val pendingApprovalCommands = ConcurrentHashMap<String, String>()
 
     // Tracks which msgIds have had notifyStart sent to the frontend
     // When tools are enabled, notifyStart is deferred until the final response round
@@ -187,6 +188,7 @@ class ChatService(private val project: Project) : Disposable {
         session = ChatSession()
         pendingApprovals.values.forEach { it.complete(false) }
         pendingApprovals.clear()
+        pendingApprovalCommands.clear()
         sessionStore.clearSession()
         contextFileCallback?.invoke("")
         publishStatus()
@@ -214,11 +216,22 @@ class ChatService(private val project: Project) : Disposable {
         )
     }
 
-    fun onApprovalResponse(requestId: String, decision: String) {
+    fun onApprovalResponse(requestId: String, decision: String, addToWhitelist: Boolean = false) {
         logger.info(
             "[CodePlanGUI Approval] received frontend decision " +
-                "requestId=$requestId decision=$decision hasPending=${pendingApprovals.containsKey(requestId)}"
+                "requestId=$requestId decision=$decision addToWhitelist=$addToWhitelist hasPending=${pendingApprovals.containsKey(requestId)}"
         )
+        if (addToWhitelist && decision == "allow") {
+            val command = pendingApprovalCommands[requestId]
+            if (command != null) {
+                val baseCommand = CommandExecutionService.extractBaseCommand(command)
+                val whitelist = PluginSettings.getInstance().getState().commandWhitelist
+                if (baseCommand !in whitelist) {
+                    whitelist.add(baseCommand)
+                    logger.info("[CodePlanGUI Approval] added '$baseCommand' to whitelist (from command: ${command.summarizeForLog()})")
+                }
+            }
+        }
         pendingApprovals[requestId]?.complete(decision == "allow")
     }
 
@@ -505,20 +518,7 @@ $selection
                 "description=${toolCall.description.summarizeForLog()}"
         )
 
-        bridgeHandler?.notifyApprovalRequest(requestId, toolCall.command, toolCall.description)
-
-        if (!CommandExecutionService.isWhitelisted(toolCall.command, state.commandWhitelist)) {
-            logger.info(
-                "[CodePlanGUI Approval] blocked by whitelist " +
-                    "requestId=$requestId index=${toolCall.index} command=${toolCall.command.summarizeForLog()}"
-            )
-            val result = ExecutionResult.Blocked(
-                toolCall.command,
-                "'${CommandExecutionService.extractBaseCommand(toolCall.command)}' is not in the allowed command list"
-            )
-            bridgeHandler?.notifyExecutionStatus(requestId, "blocked", result.toToolResultContent())
-            return CompletedToolCall(toolCall, result)
-        }
+        bridgeHandler?.notifyExecutionCard(requestId, toolCall.command, toolCall.description)
 
         val basePath = project.basePath ?: ""
         if (CommandExecutionService.hasPathsOutsideWorkspace(toolCall.command, basePath)) {
@@ -532,34 +532,54 @@ $selection
             return CompletedToolCall(toolCall, result)
         }
 
-        bridgeHandler?.notifyLog(requestId, "Security check passed", "info")
-
-        val future = CompletableFuture<Boolean>()
-        pendingApprovals[requestId] = future
-        bridgeHandler?.notifyExecutionStatus(requestId, "waiting", "{}")
-        bridgeHandler?.notifyLog(requestId, "Waiting for approval...", "info")
-        logger.info("[CodePlanGUI Approval] waiting for user decision requestId=$requestId index=${toolCall.index}")
-
-        val approved = try {
-            withContext(Dispatchers.IO) { future.get(60, TimeUnit.SECONDS) }
-        } catch (e: Exception) {
-            logger.info(
-                "[CodePlanGUI Approval] decision wait failed " +
-                    "requestId=$requestId index=${toolCall.index} error=${e.javaClass.simpleName}:${e.message ?: ""}"
-            )
-            false
-        } finally {
-            pendingApprovals.remove(requestId)
-        }
         logger.info(
-            "[CodePlanGUI Approval] resolved user decision " +
-                "requestId=$requestId index=${toolCall.index} approved=$approved"
+            "[CodePlanGUI Approval] whitelist check " +
+                "requestId=$requestId baseCommand=${CommandExecutionService.extractBaseCommand(toolCall.command)} " +
+                "whitelist=${state.commandWhitelist}"
         )
 
-        if (!approved) {
-            val result = ExecutionResult.Denied(toolCall.command, "User rejected the command")
-            bridgeHandler?.notifyExecutionStatus(requestId, "denied", result.toToolResultContent())
-            return CompletedToolCall(toolCall, result)
+        val whitelisted = CommandExecutionService.isWhitelisted(toolCall.command, state.commandWhitelist)
+        if (!whitelisted) {
+            logger.info(
+                "[CodePlanGUI Approval] command not in whitelist, requesting approval " +
+                    "requestId=$requestId index=${toolCall.index} command=${toolCall.command.summarizeForLog()}"
+            )
+            bridgeHandler?.notifyApprovalRequest(requestId, toolCall.command, toolCall.description)
+            bridgeHandler?.notifyExecutionStatus(requestId, "waiting", "{}")
+            bridgeHandler?.notifyLog(requestId, "Waiting for approval...", "info")
+
+            val future = CompletableFuture<Boolean>()
+            pendingApprovals[requestId] = future
+            pendingApprovalCommands[requestId] = toolCall.command
+
+            val approved = try {
+                withContext(Dispatchers.IO) { future.get(60, TimeUnit.SECONDS) }
+            } catch (e: Exception) {
+                logger.info(
+                    "[CodePlanGUI Approval] decision wait failed " +
+                        "requestId=$requestId index=${toolCall.index} error=${e.javaClass.simpleName}:${e.message ?: ""}"
+                )
+                false
+            } finally {
+                pendingApprovals.remove(requestId)
+                pendingApprovalCommands.remove(requestId)
+            }
+            logger.info(
+                "[CodePlanGUI Approval] resolved user decision " +
+                    "requestId=$requestId index=${toolCall.index} approved=$approved"
+            )
+
+            if (!approved) {
+                val result = ExecutionResult.Denied(toolCall.command, "User rejected the command")
+                bridgeHandler?.notifyExecutionStatus(requestId, "denied", result.toToolResultContent())
+                return CompletedToolCall(toolCall, result)
+            }
+        } else {
+            bridgeHandler?.notifyLog(requestId, "Command whitelisted, auto-approved", "info")
+            logger.info(
+                "[CodePlanGUI Approval] command is whitelisted, auto-approving " +
+                    "requestId=$requestId index=${toolCall.index} command=${toolCall.command.summarizeForLog()}"
+            )
         }
 
         bridgeHandler?.notifyExecutionStatus(requestId, "running", "{}")
@@ -618,6 +638,7 @@ $selection
         activeStream?.cancel()
         pendingApprovals.values.forEach { it.complete(false) }
         pendingApprovals.clear()
+        pendingApprovalCommands.clear()
         bridgeNotifiedStart.clear()
         scope.cancel()
     }

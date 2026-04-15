@@ -51,7 +51,7 @@ class BridgeHandlerDispatchTest {
 
                 override fun onFrontendReady() = Unit
 
-                override fun approvalResponse(requestId: String, decision: String) = Unit
+                override fun approvalResponse(requestId: String, decision: String, addToWhitelist: Boolean) = Unit
 
                 override fun debugLog(text: String) = Unit
 
@@ -76,7 +76,7 @@ class BridgeHandlerDispatchTest {
             commands = commands
         )
 
-        assertEquals(listOf(Pair("req-123", "allow")), commands.approvalResponses)
+        assertEquals(listOf(Triple("req-123", "allow", false)), commands.approvalResponses)
     }
 
     @Test
@@ -124,7 +124,7 @@ class BridgeHandlerDispatchTest {
     private class RecordingBridgeCommands : BridgeCommands {
         val sentMessages = mutableListOf<SentMessage>()
         var frontendReadyCalls: Int = 0
-        val approvalResponses = mutableListOf<Pair<String, String>>()
+        val approvalResponses = mutableListOf<Triple<String, String, Boolean>>()
         val debugLogs = mutableListOf<String>()
         var cancelStreamCalls: Int = 0
 
@@ -140,8 +140,8 @@ class BridgeHandlerDispatchTest {
             frontendReadyCalls += 1
         }
 
-        override fun approvalResponse(requestId: String, decision: String) {
-            approvalResponses += Pair(requestId, decision)
+        override fun approvalResponse(requestId: String, decision: String, addToWhitelist: Boolean) {
+            approvalResponses += Triple(requestId, decision, addToWhitelist)
         }
 
         override fun debugLog(text: String) {

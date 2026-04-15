@@ -98,6 +98,21 @@ export default function App() {
     window.__bridge?.debugLog(message)
   }, [])
 
+  const onExecutionCard = useCallback((requestId: string, command: string, description: string) => {
+    emitFrontendDebugLog(
+      `[approval-ui] received execution card requestId=${requestId} command=${command} description=${description}`,
+    )
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: requestId,
+        role: 'execution' as const,
+        content: '',
+        execution: { requestId, command, status: 'running' as ExecutionStatus },
+      },
+    ])
+  }, [emitFrontendDebugLog])
+
   const onApprovalRequest = useCallback((requestId: string, command: string, description: string) => {
     emitFrontendDebugLog(
       `[approval-ui] received approval request requestId=${requestId} command=${command} description=${description}`,
@@ -106,15 +121,13 @@ export default function App() {
     setApprovalCommand(command)
     setApprovalDescription(description)
     setApprovalOpen(true)
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: requestId,
-        role: 'execution' as const,
-        content: '',
-        execution: { requestId, command, status: 'waiting' as ExecutionStatus },
-        },
-    ])
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === requestId
+          ? { ...msg, execution: { ...msg.execution!, status: 'waiting' as ExecutionStatus } }
+          : msg
+      )
+    )
   }, [emitFrontendDebugLog])
 
   const onExecutionStatus = useCallback((requestId: string, status: string, resultJson: string) => {
@@ -132,10 +145,10 @@ export default function App() {
     )
   }, [emitFrontendDebugLog])
 
-  const handleApprovalAllow = useCallback(() => {
-    emitFrontendDebugLog(`[approval-ui] modal allow clicked requestId=${approvalRequestId}`)
+  const handleApprovalAllow = useCallback((addToWhitelist: boolean) => {
+    emitFrontendDebugLog(`[approval-ui] modal allow clicked requestId=${approvalRequestId} addToWhitelist=${addToWhitelist}`)
     setApprovalOpen(false)
-    window.__bridge?.approvalResponse(approvalRequestId, 'allow')
+    window.__bridge?.approvalResponse(approvalRequestId, 'allow', addToWhitelist)
   }, [approvalRequestId, emitFrontendDebugLog])
 
   const handleApprovalDeny = useCallback(() => {
@@ -194,6 +207,7 @@ export default function App() {
     onContextFile,
     onTheme,
     onApprovalRequest,
+    onExecutionCard,
     onExecutionStatus,
     onLog,
     onRestoreMessages,
@@ -220,7 +234,6 @@ export default function App() {
     const userMsgId = uuidv4()
     setMessages((prev) => [...prev, { id: userMsgId, role: 'user', content: payload.text }])
     setInputText('')
-    console.log('[CodePlanGUI] handleSend:', payload.text, 'includeContext:', includeContext)
     window.__bridge?.sendMessage(payload.text, includeContext)
   }
 

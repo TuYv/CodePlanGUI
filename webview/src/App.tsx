@@ -222,6 +222,13 @@ export default function App() {
     onLog,
     onRestoreMessages,
   })
+  // Clear stale errors when the bridge reconnects (e.g., after webview reload)
+  useEffect(() => {
+    if (bridgeReady) {
+      setError(null)
+    }
+  }, [bridgeReady])
+
   const composerReadiness = getComposerReadiness({
     inputText,
     isLoading,

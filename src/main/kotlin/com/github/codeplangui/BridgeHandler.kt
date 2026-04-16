@@ -196,6 +196,25 @@ class BridgeHandler(
                         document.dispatchEvent(new Event('bridge_ready'));
                     """.trimIndent()
                     browser.executeJavaScript(js, "", 0)
+
+                    // Prevent JCEF WebView freeze on Ctrl+C/Cmd+C by intercepting
+                    // the keyboard event and using async clipboard API instead of
+                    // letting CEF handle it synchronously. Ref: jetbrains-cc-gui #846
+                    val clipboardJs = """
+                        document.addEventListener('keydown', function(e) {
+                            if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+                                var selection = window.getSelection();
+                                if (selection && selection.toString().length > 0) {
+                                    e.preventDefault();
+                                    var text = selection.toString();
+                                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                                        navigator.clipboard.writeText(text).catch(function() {});
+                                    }
+                                }
+                            }
+                        }, true);
+                    """.trimIndent()
+                    browser.executeJavaScript(clipboardJs, "", 0)
                 }
             }
         }, browser.cefBrowser)

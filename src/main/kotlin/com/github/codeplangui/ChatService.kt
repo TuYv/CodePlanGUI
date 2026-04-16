@@ -112,14 +112,22 @@ class ChatService(private val project: Project) : Disposable {
         val provider = settings.getActiveProvider()
         if (provider == null) {
             publishStatus()
-            bridgeHandler?.notifyError("请先在 Settings > Tools > CodePlanGUI 中配置 API Provider")
+            bridgeHandler?.notifyStructuredError(BridgeErrorPayload(
+                type = "config",
+                message = "请先在 Settings > Tools > CodePlanGUI 中配置 API Provider",
+                action = "openSettings"
+            ))
             return
         }
 
         val apiKey = ApiKeyStore.load(provider.id) ?: ""
         if (apiKey.isBlank()) {
             publishStatus()
-            bridgeHandler?.notifyError("API Key 未设置或未保存，请在 Settings 中重新配置并点 Apply/OK")
+            bridgeHandler?.notifyStructuredError(BridgeErrorPayload(
+                type = "config",
+                message = "API Key 未设置或未保存，请在 Settings 中重新配置并点 Apply/OK",
+                action = "openSettings"
+            ))
             return
         }
 
@@ -385,7 +393,10 @@ $selection
         bridgeNotifiedStart.remove(msgId)
         resetToolCallState()
         publishStatus()
-        bridgeHandler?.notifyError(errorMessage)
+        bridgeHandler?.notifyStructuredError(BridgeErrorPayload(
+            type = "runtime",
+            message = errorMessage
+        ))
     }
 
     private fun startStreamingRound(msgId: String, request: okhttp3.Request, toolsEnabled: Boolean) {
@@ -437,7 +448,7 @@ $selection
                         activeMessageId = null
                         bridgeNotifiedStart.remove(msgId)
                         publishStatus()
-                        bridgeHandler?.notifyError(message)
+                        bridgeHandler?.notifyStructuredError(classifyStreamError(message))
                     }
                 },
                 onToolCallChunk = { delta ->
@@ -675,6 +686,23 @@ $selection
                 restoredMessages
             )
         )
+    }
+
+    private fun classifyStreamError(message: String): BridgeErrorPayload {
+        val lowerMsg = message.lowercase()
+        return when {
+            lowerMsg.contains("401") || lowerMsg.contains("403") ||
+            lowerMsg.contains("api key") || lowerMsg.contains("unauthorized") ->
+                BridgeErrorPayload(type = "config", message = message, action = "openSettings")
+
+            lowerMsg.contains("timeout") || lowerMsg.contains("超时") ||
+            lowerMsg.contains("无法连接") || lowerMsg.contains("connectexception") ||
+            lowerMsg.contains("http 5") || lowerMsg.contains("http 429") ->
+                BridgeErrorPayload(type = "network", message = message, action = "retry")
+
+            else ->
+                BridgeErrorPayload(type = "runtime", message = message)
+        }
     }
 
     companion object {

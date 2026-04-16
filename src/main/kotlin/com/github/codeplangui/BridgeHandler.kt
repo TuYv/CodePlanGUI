@@ -19,12 +19,9 @@ private data class BridgePayload(
     val includeContext: Boolean = true,
     val requestId: String = "",
     val decision: String = "",
-<<<<<<< Updated upstream
-    val addToWhitelist: Boolean = false
-=======
+    val addToWhitelist: Boolean = false,
     val current: Int = 0,
     val max: Int = 0
->>>>>>> Stashed changes
 )
 
 internal interface BridgeCommands {
@@ -196,11 +193,8 @@ class BridgeHandler(
                             onLog: function(msgId, logLine, type) {},
                             onExecutionStatus: function(requestId, status, result) {},
                             onRestoreMessages: function(messages) {},
-<<<<<<< Updated upstream
-                            onStructuredError: function(error) {}
-=======
+                            onStructuredError: function(error) {},
                             onContinuation: function(current, max) {}
->>>>>>> Stashed changes
                         };
                         document.dispatchEvent(new Event('bridge_ready'));
                     """.trimIndent()

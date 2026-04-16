@@ -259,12 +259,8 @@ export default function App() {
     const userMsgId = uuidv4()
     setMessages((prev) => [...prev, { id: userMsgId, role: 'user', content: payload.text }])
     setInputText('')
-<<<<<<< Updated upstream
-=======
     setIsLoading(true)
     setError(null)
-    console.log('[CodePlanGUI] handleSend:', payload.text, 'includeContext:', includeContext)
->>>>>>> Stashed changes
     window.__bridge?.sendMessage(payload.text, includeContext)
   }
 

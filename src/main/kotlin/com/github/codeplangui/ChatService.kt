@@ -722,14 +722,7 @@ $selection
         val data = sessionStore.loadSession() ?: return
         session = ChatSession(data.threadId)
         data.messages.forEach { session.add(it) }
-<<<<<<< Updated upstream
         val restoredMessages = filterRestorableMessages(data.messages)
-=======
-        val restoredMessages = data.messages
-            .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT }
-            .filterNot { it.hidden }
-            .filterNot { it.role == MessageRole.ASSISTANT && it.content.isBlank() }
->>>>>>> Stashed changes
             .map {
                 RestoredMessagePayload(
                     id = it.id,
@@ -906,4 +899,5 @@ internal fun filterRestorableMessages(
     messages: List<Message>
 ): List<Message> = messages
     .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT }
+    .filterNot { it.hidden }
     .filterNot { it.role == MessageRole.ASSISTANT && it.content.isBlank() }

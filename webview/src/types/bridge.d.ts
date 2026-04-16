@@ -31,8 +31,9 @@ export interface Bridge {
   onStatus: (status: BridgeStatus) => void
   onContextFile: (fileName: string) => void
   onTheme: (theme: 'dark' | 'light') => void
-  approvalResponse: (requestId: string, decision: 'allow' | 'deny') => void
+  approvalResponse: (requestId: string, decision: 'allow' | 'deny', addToWhitelist?: boolean) => void
   onApprovalRequest: (requestId: string, command: string, description: string) => void
+  onExecutionCard: (requestId: string, command: string, description: string) => void
   onExecutionStatus: (requestId: string, status: string, result: string) => void
   onLog: (msgId: string, logLine: string, type: string) => void
   onRestoreMessages: (messages: string) => void

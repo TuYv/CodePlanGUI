@@ -18,7 +18,8 @@ private data class BridgePayload(
     val text: String = "",
     val includeContext: Boolean = true,
     val requestId: String = "",
-    val decision: String = ""
+    val decision: String = "",
+    val addToWhitelist: Boolean = false
 )
 
 internal interface BridgeCommands {
@@ -26,7 +27,7 @@ internal interface BridgeCommands {
     fun newChat()
     fun openSettings()
     fun onFrontendReady()
-    fun approvalResponse(requestId: String, decision: String)
+    fun approvalResponse(requestId: String, decision: String, addToWhitelist: Boolean)
     fun debugLog(text: String)
     fun cancelStream()
 }
@@ -37,6 +38,7 @@ internal fun dispatchBridgeRequest(
     includeContext: Boolean,
     requestId: String = "",
     decision: String = "",
+    addToWhitelist: Boolean = false,
     commands: BridgeCommands
 ) {
     when (type) {
@@ -44,7 +46,7 @@ internal fun dispatchBridgeRequest(
         "newChat"          -> commands.newChat()
         "openSettings"     -> commands.openSettings()
         "frontendReady"    -> commands.onFrontendReady()
-        "approvalResponse" -> commands.approvalResponse(requestId, decision)
+        "approvalResponse" -> commands.approvalResponse(requestId, decision, addToWhitelist)
         "debugLog"         -> commands.debugLog(text)
         "cancelStream"     -> commands.cancelStream()
     }
@@ -68,7 +70,7 @@ internal fun handleBridgePayload(
     }
 
     return try {
-        dispatchBridgeRequest(req.type, req.text, req.includeContext, req.requestId, req.decision, commands)
+        dispatchBridgeRequest(req.type, req.text, req.includeContext, req.requestId, req.decision, req.addToWhitelist, commands)
         BridgePayloadHandlingResult.Success
     } catch (e: Exception) {
         BridgePayloadHandlingResult.CommandError(
@@ -115,9 +117,9 @@ class BridgeHandler(
                         chatService.onFrontendReady()
                     }
 
-                    override fun approvalResponse(requestId: String, decision: String) {
-                        logger.info("[CodePlanGUI Bridge] frontend->ide approvalResponse requestId=$requestId decision=$decision")
-                        chatService.onApprovalResponse(requestId, decision)
+                    override fun approvalResponse(requestId: String, decision: String, addToWhitelist: Boolean) {
+                        logger.info("[CodePlanGUI Bridge] frontend->ide approvalResponse requestId=$requestId decision=$decision addToWhitelist=$addToWhitelist")
+                        chatService.onApprovalResponse(requestId, decision, addToWhitelist)
                     }
 
                     override fun debugLog(text: String) {
@@ -164,8 +166,8 @@ class BridgeHandler(
                             frontendReady: function() {
                                 ${sendQuery.inject("""JSON.stringify({type:'frontendReady',text:''})""")}
                             },
-                            approvalResponse: function(requestId, decision) {
-                                ${sendQuery.inject("""JSON.stringify({type:'approvalResponse',text:'',requestId:requestId,decision:decision})""")}
+                            approvalResponse: function(requestId, decision, addToWhitelist) {
+                                ${sendQuery.inject("""JSON.stringify({type:'approvalResponse',text:'',requestId:requestId,decision:decision,addToWhitelist:!!addToWhitelist})""")}
                             },
                             debugLog: function(text) {
                                 ${sendQuery.inject("""JSON.stringify({type:'debugLog',text:text})""")}
@@ -178,6 +180,7 @@ class BridgeHandler(
                             onContextFile: function(fileName) {},
                             onTheme: function(theme) {},
                             onApprovalRequest: function(requestId, command, description) {},
+                            onExecutionCard: function(requestId, command, description) {},
                             onLog: function(msgId, logLine, type) {},
                             onExecutionStatus: function(requestId, status, result) {},
                             onRestoreMessages: function(messages) {}
@@ -213,6 +216,14 @@ class BridgeHandler(
             "${json.encodeToString(msgId)}," +
             "${json.encodeToString(logLine)}," +
             "${json.encodeToString(type)})"
+        )
+
+    fun notifyExecutionCard(requestId: String, command: String, description: String) =
+        pushJS(
+            "window.__bridge.onExecutionCard(" +
+            "${json.encodeToString(requestId)}," +
+            "${json.encodeToString(command)}," +
+            "${json.encodeToString(description)})"
         )
 
     fun notifyApprovalRequest(requestId: String, command: String, description: String) =

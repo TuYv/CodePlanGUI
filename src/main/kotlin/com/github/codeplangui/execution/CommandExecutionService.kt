@@ -31,16 +31,16 @@ class CommandExecutionService(private val project: Project) {
             process.destroyForcibly()
             ExecutionResult.TimedOut(
                 command = command,
-                stdout = truncateOutput(stdout, 4000),
+                stdout = truncateOutput(stdout, 20000),
                 timeoutSeconds = timeoutSeconds
             )
         } else {
-            val truncated = stdout.length > 4000 || stderr.length > 2000
+            val truncated = stdout.length > 20000 || stderr.length > 10000
             if (process.exitValue() == 0) {
                 ExecutionResult.Success(
                     command = command,
-                    stdout = truncateOutput(stdout, 4000),
-                    stderr = truncateOutput(stderr, 2000),
+                    stdout = truncateOutput(stdout, 20000),
+                    stderr = truncateOutput(stderr, 10000),
                     exitCode = 0,
                     durationMs = durationMs,
                     truncated = truncated
@@ -48,8 +48,8 @@ class CommandExecutionService(private val project: Project) {
             } else {
                 ExecutionResult.Failed(
                     command = command,
-                    stdout = truncateOutput(stdout, 4000),
-                    stderr = truncateOutput(stderr, 2000),
+                    stdout = truncateOutput(stdout, 20000),
+                    stderr = truncateOutput(stderr, 10000),
                     exitCode = process.exitValue(),
                     durationMs = durationMs,
                     truncated = truncated
@@ -101,16 +101,16 @@ class CommandExecutionService(private val project: Project) {
             process.destroyForcibly()
             ExecutionResult.TimedOut(
                 command = command,
-                stdout = truncateOutput(stdout, 4000),
+                stdout = truncateOutput(stdout, 20000),
                 timeoutSeconds = timeoutSeconds
             )
         } else {
-            val truncated = stdout.length > 4000 || stderr.length > 2000
+            val truncated = stdout.length > 20000 || stderr.length > 10000
             if (process.exitValue() == 0) {
                 ExecutionResult.Success(
                     command = command,
-                    stdout = truncateOutput(stdout, 4000),
-                    stderr = truncateOutput(stderr, 2000),
+                    stdout = truncateOutput(stdout, 20000),
+                    stderr = truncateOutput(stderr, 10000),
                     exitCode = 0,
                     durationMs = durationMs,
                     truncated = truncated
@@ -118,8 +118,8 @@ class CommandExecutionService(private val project: Project) {
             } else {
                 ExecutionResult.Failed(
                     command = command,
-                    stdout = truncateOutput(stdout, 4000),
-                    stderr = truncateOutput(stderr, 2000),
+                    stdout = truncateOutput(stdout, 20000),
+                    stderr = truncateOutput(stderr, 10000),
                     exitCode = process.exitValue(),
                     durationMs = durationMs,
                     truncated = truncated

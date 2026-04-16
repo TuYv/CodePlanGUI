@@ -10,6 +10,7 @@ interface BridgeCallbacks {
   onContextFile: (fileName: string) => void
   onTheme: (theme: 'dark' | 'light') => void
   onApprovalRequest: (requestId: string, command: string, description: string) => void
+  onExecutionCard: (requestId: string, command: string, description: string) => void
   onExecutionStatus: (requestId: string, status: string, result: string) => void
   onLog: (msgId: string, logLine: string, type: string) => void
   onRestoreMessages: (messages: string) => void
@@ -34,6 +35,7 @@ export function useBridge(callbacks: BridgeCallbacks) {
     window.__bridge.onContextFile = callbacks.onContextFile
     window.__bridge.onTheme = callbacks.onTheme
     window.__bridge.onApprovalRequest = callbacks.onApprovalRequest
+    window.__bridge.onExecutionCard = callbacks.onExecutionCard
     window.__bridge.onExecutionStatus = callbacks.onExecutionStatus
     window.__bridge.onLog = callbacks.onLog
     window.__bridge.onRestoreMessages = callbacks.onRestoreMessages
@@ -60,6 +62,7 @@ export function useBridge(callbacks: BridgeCallbacks) {
           onTheme: currentCallbacks.onTheme,
           approvalResponse: () => {},
           onApprovalRequest: currentCallbacks.onApprovalRequest,
+          onExecutionCard: currentCallbacks.onExecutionCard,
           onExecutionStatus: currentCallbacks.onExecutionStatus,
           onLog: currentCallbacks.onLog,
           onRestoreMessages: currentCallbacks.onRestoreMessages,
@@ -73,6 +76,7 @@ export function useBridge(callbacks: BridgeCallbacks) {
         window.__bridge.onContextFile = currentCallbacks.onContextFile
         window.__bridge.onTheme = currentCallbacks.onTheme
         window.__bridge.onApprovalRequest = currentCallbacks.onApprovalRequest
+        window.__bridge.onExecutionCard = currentCallbacks.onExecutionCard
         window.__bridge.onExecutionStatus = currentCallbacks.onExecutionStatus
         window.__bridge.onLog = currentCallbacks.onLog
         window.__bridge.onRestoreMessages = currentCallbacks.onRestoreMessages

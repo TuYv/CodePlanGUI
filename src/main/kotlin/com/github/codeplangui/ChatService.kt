@@ -4,6 +4,8 @@ import com.github.codeplangui.api.OkHttpSseClient
 import com.github.codeplangui.api.ToolCallAccumulator
 import com.github.codeplangui.api.ToolCallDelta
 import com.github.codeplangui.api.ToolDefinition
+import com.github.codeplangui.api.TruncationDecision
+import com.github.codeplangui.api.TruncationHandler
 import com.github.codeplangui.execution.CommandExecutionService
 import com.github.codeplangui.execution.ExecutionResult
 import com.github.codeplangui.execution.ShellPlatform
@@ -62,6 +64,9 @@ class ChatService(private val project: Project) : Disposable {
 
     // Tool call state machine
     private val toolCallAccumulator = ToolCallAccumulator()
+
+    // Truncation / auto-continuation state
+    private val truncationHandler = TruncationHandler()
 
     // Approval gate: suspended coroutines wait on these futures
     private val pendingApprovals = ConcurrentHashMap<String, CompletableFuture<Boolean>>()
@@ -157,6 +162,7 @@ class ChatService(private val project: Project) : Disposable {
 
         // Reset state machine before each new user-initiated request
         resetToolCallState()
+        truncationHandler.reset()
 
         val msgId = UUID.randomUUID().toString()
         activeMessageId = msgId
@@ -198,6 +204,7 @@ class ChatService(private val project: Project) : Disposable {
         activeStream?.cancel()
         activeStream = null
         activeMessageId = null
+        truncationHandler.reset()
         resetToolCallState()
         bridgeNotifiedStart.clear()
         session = ChatSession()
@@ -401,6 +408,7 @@ $selection
 
     private fun startStreamingRound(msgId: String, request: okhttp3.Request, toolsEnabled: Boolean) {
         val responseBuffer = StringBuilder()
+        var suppressEnd = false
         scope.launch {
             val stream = client.streamChat(
                 request = request,
@@ -416,7 +424,7 @@ $selection
                     }
                 },
                 onEnd = {
-                    if (activeMessageId == msgId) {
+                    if (activeMessageId == msgId && !suppressEnd) {
                         // If the bubble hasn't been started yet (no tool calls in this round),
                         // start it now and flush the buffered content.
                         if (msgId !in bridgeNotifiedStart) {
@@ -463,6 +471,20 @@ $selection
                         val capturedBuffer = responseBuffer
                         scope.launch { handleToolCallComplete(msgId, capturedBuffer) }
                     }
+                    if (reason == "length" && activeMessageId == msgId) {
+                        val capturedBuffer = StringBuilder(responseBuffer)
+                        val hasIncompleteToolCalls = !toolCallAccumulator.isEmpty()
+                        when (val decision = truncationHandler.handleFinishReasonLength(responseBuffer, hasIncompleteToolCalls)) {
+                            is TruncationDecision.AutoContinue -> {
+                                suppressEnd = true
+                                logger.info("[CodePlanGUI Truncation] auto-continuation ${decision.count}/${decision.max} msgId=$msgId")
+                                scope.launch { handleLengthTruncation(msgId, capturedBuffer, decision.continuationPrompt) }
+                            }
+                            is TruncationDecision.Exhausted -> {
+                                logger.info("[CodePlanGUI Truncation] max continuations reached, appending marker msgId=$msgId")
+                            }
+                        }
+                    }
                 }
             )
             if (activeMessageId == msgId) {
@@ -475,6 +497,36 @@ $selection
 
     private fun resetToolCallState() {
         toolCallAccumulator.clear()
+    }
+
+    private suspend fun handleLengthTruncation(msgId: String, partialBuffer: StringBuilder, continuationPrompt: String) {
+        if (activeMessageId != msgId) return
+
+        // Save partial assistant response
+        session.add(Message(
+            role = MessageRole.ASSISTANT,
+            content = partialBuffer.toString(),
+            id = UUID.randomUUID().toString(),
+            seq = session.nextSeq()
+        ))
+
+        // Discard incomplete tool calls if any
+        if (!toolCallAccumulator.isEmpty()) {
+            logger.info("[CodePlanGUI Truncation] discarding incomplete tool calls during continuation msgId=$msgId")
+            resetToolCallState()
+        }
+
+        session.add(Message(
+            role = MessageRole.USER,
+            content = continuationPrompt,
+            id = UUID.randomUUID().toString(),
+            seq = session.nextSeq(),
+            hidden = true
+        ))
+        persistSession()
+
+        bridgeHandler?.notifyContinuation(truncationHandler.count, TruncationHandler.MAX_CONTINUATIONS)
+        sendMessageInternal(msgId)
     }
 
     private fun persistSession() {
@@ -670,7 +722,14 @@ $selection
         val data = sessionStore.loadSession() ?: return
         session = ChatSession(data.threadId)
         data.messages.forEach { session.add(it) }
+<<<<<<< Updated upstream
         val restoredMessages = filterRestorableMessages(data.messages)
+=======
+        val restoredMessages = data.messages
+            .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT }
+            .filterNot { it.hidden }
+            .filterNot { it.role == MessageRole.ASSISTANT && it.content.isBlank() }
+>>>>>>> Stashed changes
             .map {
                 RestoredMessagePayload(
                     id = it.id,

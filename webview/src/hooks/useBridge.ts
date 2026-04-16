@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { BridgeStatus } from '../types/bridge'
+import { BridgeError, BridgeStatus } from '../types/bridge'
 
 interface BridgeCallbacks {
   onStart: (msgId: string) => void
   onToken: (token: string) => void
   onEnd: (msgId: string) => void
   onError: (message: string) => void
+  onStructuredError: (error: BridgeError) => void
   onStatus: (status: BridgeStatus) => void
   onContextFile: (fileName: string) => void
   onTheme: (theme: 'dark' | 'light') => void
@@ -31,6 +32,7 @@ export function useBridge(callbacks: BridgeCallbacks) {
     window.__bridge.onToken = callbacks.onToken
     window.__bridge.onEnd = callbacks.onEnd
     window.__bridge.onError = callbacks.onError
+    window.__bridge.onStructuredError = callbacks.onStructuredError
     window.__bridge.onStatus = callbacks.onStatus
     window.__bridge.onContextFile = callbacks.onContextFile
     window.__bridge.onTheme = callbacks.onTheme
@@ -57,6 +59,7 @@ export function useBridge(callbacks: BridgeCallbacks) {
           onToken: currentCallbacks.onToken,
           onEnd: currentCallbacks.onEnd,
           onError: currentCallbacks.onError,
+          onStructuredError: currentCallbacks.onStructuredError,
           onStatus: currentCallbacks.onStatus,
           onContextFile: currentCallbacks.onContextFile,
           onTheme: currentCallbacks.onTheme,
@@ -72,6 +75,7 @@ export function useBridge(callbacks: BridgeCallbacks) {
         window.__bridge.onToken = currentCallbacks.onToken
         window.__bridge.onEnd = currentCallbacks.onEnd
         window.__bridge.onError = currentCallbacks.onError
+        window.__bridge.onStructuredError = currentCallbacks.onStructuredError
         window.__bridge.onStatus = currentCallbacks.onStatus
         window.__bridge.onContextFile = currentCallbacks.onContextFile
         window.__bridge.onTheme = currentCallbacks.onTheme

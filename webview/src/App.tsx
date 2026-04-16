@@ -13,6 +13,7 @@ import { parseExecutionResultPayload, stringifyExecutionResultPayload } from './
 import { useBridge } from './hooks/useBridge'
 import { prepareSendPayload } from './sendState'
 import { applyBridgeStatus, applyContextFile } from './statusState'
+import type { BridgeError } from './types/bridge'
 import { BridgeStatus } from './types/bridge'
 import './App.css'
 
@@ -22,7 +23,7 @@ export default function App() {
   const isComposingRef = useRef(false)
   const [isLoading, setIsLoading] = useState(false)
   const [includeContext, setIncludeContext] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<BridgeError | null>(null)
   const [status, setStatus] = useState<BridgeStatus>({
     providerName: '',
     model: '',
@@ -79,7 +80,15 @@ export default function App() {
     setMessages((prev) =>
       prev.map((item) => (item.isStreaming ? { ...item, isStreaming: false } : item)),
     )
-    setError(message)
+    setError({ type: 'runtime', message })
+  }, [])
+
+  const onStructuredError = useCallback((bridgeError: BridgeError) => {
+    setIsLoading(false)
+    setMessages((prev) =>
+      prev.map((item) => (item.isStreaming ? { ...item, isStreaming: false } : item)),
+    )
+    setError(bridgeError)
   }, [])
 
   const onContextFile = useCallback((fileName: string) => {
@@ -203,6 +212,7 @@ export default function App() {
     onToken,
     onEnd,
     onError,
+    onStructuredError,
     onStatus,
     onContextFile,
     onTheme,
@@ -223,7 +233,7 @@ export default function App() {
   const handleSend = () => {
     if (!composerReadiness.canSend) {
       if (composerReadiness.reason && composerReadiness.text) {
-        setError(composerReadiness.reason)
+        setError({ type: 'runtime', message: composerReadiness.reason! })
       }
       return
     }
@@ -301,7 +311,7 @@ export default function App() {
           bridgeReady={bridgeReady}
         />
 
-        {error && <ErrorBanner message={error} onClose={() => setError(null)} />}
+        {error && <ErrorBanner error={error} onClose={() => setError(null)} />}
 
         <div className="messages-area">
           {messages.length === 0 && (

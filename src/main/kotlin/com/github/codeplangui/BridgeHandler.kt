@@ -87,6 +87,13 @@ data class BridgeStatusPayload(
     val connectionState: String = "unconfigured"
 )
 
+@Serializable
+data class BridgeErrorPayload(
+    val type: String,
+    val message: String,
+    val action: String? = null
+)
+
 class BridgeHandler(
     private val browser: JBCefBrowser,
     private val chatService: ChatService
@@ -183,7 +190,8 @@ class BridgeHandler(
                             onExecutionCard: function(requestId, command, description) {},
                             onLog: function(msgId, logLine, type) {},
                             onExecutionStatus: function(requestId, status, result) {},
-                            onRestoreMessages: function(messages) {}
+                            onRestoreMessages: function(messages) {},
+                            onStructuredError: function(error) {}
                         };
                         document.dispatchEvent(new Event('bridge_ready'));
                     """.trimIndent()
@@ -200,6 +208,9 @@ class BridgeHandler(
     fun notifyEnd(msgId: String) = pushJS("window.__bridge.onEnd(${msgId.quoted()})")
 
     fun notifyError(message: String) = pushJS("window.__bridge.onError(${json.encodeToString(message)})")
+
+    fun notifyStructuredError(error: BridgeErrorPayload) =
+        pushJS("window.__bridge.onStructuredError(${json.encodeToString(error)})")
 
     fun notifyStatus(status: BridgeStatusPayload) =
         pushJS("window.__bridge.onStatus(${json.encodeToString(status)})")

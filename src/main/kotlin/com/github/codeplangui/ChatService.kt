@@ -77,6 +77,13 @@ class ChatService(private val project: Project) : Disposable {
         isFrontendReady = false
     }
 
+    /**
+     * Bridge lifecycle contract — called when frontend sends "frontendReady":
+     *   1. publishStatus()              → push provider/model/connectionState
+     *   2. restoreSessionIfNeeded()     → replay persisted messages
+     *   3. onFrontendReadyCallback()    → ChatPanel pushes theme + contextFile
+     *   4. flush pendingPrompt          → dequeues Ask AI prompts queued before bridge ready
+     */
     fun onFrontendReady() {
         isFrontendReady = true
         publishStatus()

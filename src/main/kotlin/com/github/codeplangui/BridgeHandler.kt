@@ -256,7 +256,10 @@ class BridgeHandler(
         pushJS("window.__bridge.onRestoreMessages(${json.encodeToString(messages)})")
 
     private fun pushJS(js: String) {
-        if (!isReady) return
+        if (!isReady) {
+            logger.debug("[CodePlanGUI Bridge] pushJS discarded (bridge not ready): ${js.take(120)}")
+            return
+        }
         ApplicationManager.getApplication().invokeLater {
             browser.cefBrowser.executeJavaScript(js, "", 0)
         }

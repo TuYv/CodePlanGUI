@@ -20,7 +20,7 @@ object CommitPromptBuilder {
     fun stripThinkContent(content: String): String {
         return content
             .replace(Regex("<think>[\\s\\S]*?</think>", RegexOption.DOT_MATCHES_ALL), "")
-            .replace(Regex("<think>[\\s\\S]*?</think>", RegexOption.DOT_MATCHES_ALL), "")
+            .replace(Regex("<think>[\\s\\S]*$", RegexOption.DOT_MATCHES_ALL), "")
             .trim()
     }
 
@@ -75,15 +75,20 @@ Rules:
 
     fun buildStatsUserMessage(
         files: List<DiffAnalyzer.FileChange>,
+        categorySummary: String,
         language: String
     ): String {
         val langInstruction = if (language == "zh") "中文" else "English"
-        val summary = files.joinToString("\n") { file ->
+        val fileList = files.joinToString("\n") { file ->
             "${file.path}: (${file.additions} additions, ${file.deletions} deletions)"
         }
         return """
 Below is a summary of ${files.size} changed files. Generate an appropriate commit message based on this summary.
-$summary
+
+Category overview: $categorySummary
+
+Files:
+$fileList
 
 Generate the commit message in ${langInstruction}, following Conventional Commits format.
         """.trimIndent()
@@ -118,6 +123,11 @@ Generate the commit message in ${langInstruction}, following Conventional Commit
         val path = file.path
         val lines = file.additions + file.deletions
         return "File: $path\nChange type: $changeType\nChanged lines: $lines"
+    }
+
+    fun buildSingleFilePrompt(file: CommitPromptFile): String {
+        val diffContent = buildDiffPreview(listOf(file))
+        return "File: ${file.path}\nChange type: ${file.changeType}\n\n$diffContent"
     }
 
     fun buildSystemPrompt(language: String, format: String = "conventional"): String {
@@ -189,31 +199,22 @@ $formatInstruction
     private fun previewModifiedFile(before: String?, after: String?): String {
         if (before == null || after == null) return "[modified content unavailable]\n"
 
-        val beforeLines = before.lines()
-        val afterLines = after.lines()
-        val maxLines = maxOf(beforeLines.size, afterLines.size)
+        val beforeSet = before.lines().toSet()
+        val afterSet = after.lines().toSet()
+
+        val removed = before.lines().filter { it.isNotBlank() && it !in afterSet }
+        val added = after.lines().filter { it.isNotBlank() && it !in beforeSet }
+
+        if (removed.isEmpty() && added.isEmpty()) return "[content changed but no compact diff available]\n"
+
         val changed = mutableListOf<String>()
+        val maxRemoved = MAX_CHANGED_LINES / 2
+        removed.take(maxRemoved).forEach { changed += "- $it" }
+        added.take(MAX_CHANGED_LINES - changed.size).forEach { changed += "+ $it" }
 
-        for (index in 0 until maxLines) {
-            if (changed.size >= MAX_CHANGED_LINES) break
-            val beforeLine = beforeLines.getOrNull(index)
-            val afterLine = afterLines.getOrNull(index)
-            if (beforeLine == afterLine) continue
+        val truncated = removed.size > maxRemoved || added.size > (MAX_CHANGED_LINES - removed.size.coerceAtMost(maxRemoved))
+        if (truncated) changed += "... [more changes omitted]"
 
-            if (!beforeLine.isNullOrEmpty()) {
-                changed += "- $beforeLine"
-            }
-            if (!afterLine.isNullOrEmpty() && changed.size < MAX_CHANGED_LINES) {
-                changed += "+ $afterLine"
-            }
-        }
-
-        if (changed.isEmpty()) {
-            return "[content changed but no compact diff available]\n"
-        }
-        if (maxLines > MAX_CHANGED_LINES) {
-            changed += "... [more changes omitted]"
-        }
         return changed.joinToString("\n", postfix = "\n")
     }
 }

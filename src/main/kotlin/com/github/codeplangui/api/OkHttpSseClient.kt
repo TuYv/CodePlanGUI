@@ -18,6 +18,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -27,6 +28,8 @@ import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 @Serializable
 data class FunctionDefinition(
@@ -212,6 +215,30 @@ class OkHttpSseClient(
         }
         return eventSourceFactory.newEventSource(request, listener)
     }
+
+    /**
+     * Streams the final commit message output, calling [onToken] for each visible token.
+     * Suppresses <think>...</think> content from DeepSeek-style models during streaming.
+     * Returns the full cleaned content when done.
+     */
+    suspend fun streamCommit(request: Request, onToken: (String) -> Unit): Result<String> =
+        suspendCancellableCoroutine { cont ->
+            val accumulated = StringBuilder()
+            val source = streamChat(
+                request = request,
+                onToken = { token ->
+                    accumulated.append(token)
+                    onToken(token)
+                },
+                onEnd = {
+                    if (cont.isActive) cont.resume(Result.success(accumulated.toString()))
+                },
+                onError = { error ->
+                    if (cont.isActive) cont.resume(Result.failure(Exception(error)))
+                }
+            )
+            cont.invokeOnCancellation { source.cancel() }
+        }
 
     fun callSync(request: Request): Result<String> {
         return callWithClient(syncClient, request, "请求超时，请检查网络")

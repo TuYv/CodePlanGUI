@@ -11,7 +11,6 @@ import com.intellij.openapi.progress.Task
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.vcs.VcsDataKeys
 import com.intellij.openapi.vcs.changes.Change
-import com.intellij.openapi.vcs.changes.ChangeListManager
 import com.intellij.openapi.vcs.changes.ChangesUtil
 import kotlinx.coroutines.runBlocking
 import java.lang.reflect.Method
@@ -86,9 +85,18 @@ class GenerateCommitMessageAction : AnAction() {
         indicator: com.intellij.openapi.progress.ProgressIndicator
     ) {
         val generator = TwoStageCommitGenerator(client, activeProvider, apiKey)
+        val accumulated = StringBuilder()
+
+        val onToken: (String) -> Unit = { token ->
+            accumulated.append(token)
+            val cleaned = CommitPromptBuilder.stripThinkContent(accumulated.toString())
+            ApplicationManager.getApplication().invokeLater {
+                applyCommitMessage(e, project, cleaned)
+            }
+        }
 
         val result = runBlocking {
-            generator.generate(files, settings, indicator)
+            generator.generate(files, settings, indicator, onToken)
         }
 
         ApplicationManager.getApplication().invokeLater {
@@ -98,6 +106,8 @@ class GenerateCommitMessageAction : AnAction() {
                     applyCommitMessage(e, project, cleaned.trim())
                 },
                 onFailure = { err ->
+                    // Clear any partial content on failure
+                    if (accumulated.isNotEmpty()) applyCommitMessage(e, project, "")
                     Messages.showErrorDialog(project, err.message ?: "API 调用失败", "生成失败")
                 }
             )
@@ -145,9 +155,11 @@ class GenerateCommitMessageAction : AnAction() {
 
     private fun buildSelectedFiles(e: AnActionEvent, project: com.intellij.openapi.project.Project): List<CommitPromptFile> {
         val changes = getSelectedChanges(e, project)
-        if (changes.isEmpty()) return emptyList()
+        val unversionedFiles = getIncludedUnversionedFiles(e)
 
-        return changes.mapNotNull { change ->
+        if (changes.isEmpty() && unversionedFiles.isEmpty()) return emptyList()
+
+        val fromChanges = changes.mapNotNull { change ->
             try {
                 CommitPromptFile(
                     path = ChangesUtil.getFilePath(change).path,
@@ -159,6 +171,22 @@ class GenerateCommitMessageAction : AnAction() {
                 null
             }
         }
+
+        val fromUnversioned = unversionedFiles.mapNotNull { filePath ->
+            try {
+                val file = java.io.File(filePath.path)
+                CommitPromptFile(
+                    path = filePath.path,
+                    changeType = "NEW",
+                    beforeContent = null,
+                    afterContent = if (file.isFile) file.readText() else null
+                )
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        return fromChanges + fromUnversioned
     }
 
     private fun getSelectedChanges(
@@ -176,7 +204,7 @@ class GenerateCommitMessageAction : AnAction() {
             return directChanges.asList()
         }
 
-        return ChangeListManager.getInstance(project).allChanges
+        return emptyList()
     }
 
     private fun getIncludedChangesViaReflection(workflowHandler: Any): Collection<Change>? {
@@ -188,6 +216,19 @@ class GenerateCommitMessageAction : AnAction() {
             result.filterIsInstance<Change>()
         } catch (_: Exception) {
             null
+        }
+    }
+
+    private fun getIncludedUnversionedFiles(e: AnActionEvent): List<com.intellij.openapi.vcs.FilePath> {
+        val workflowHandler = e.getData(VcsDataKeys.COMMIT_WORKFLOW_HANDLER) ?: return emptyList()
+        return try {
+            val getUiMethod: Method = workflowHandler.javaClass.getMethod("getUi")
+            val ui = getUiMethod.invoke(workflowHandler) ?: return emptyList()
+            val getMethod: Method = ui.javaClass.getMethod("getIncludedUnversionedFiles")
+            val result = getMethod.invoke(ui) as? Collection<*> ?: return emptyList()
+            result.filterIsInstance<com.intellij.openapi.vcs.FilePath>()
+        } catch (_: Exception) {
+            emptyList()
         }
     }
 

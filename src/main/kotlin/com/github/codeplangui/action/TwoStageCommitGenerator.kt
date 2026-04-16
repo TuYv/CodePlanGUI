@@ -7,17 +7,26 @@ import com.github.codeplangui.settings.ProviderConfig
 import com.github.codeplangui.settings.SettingsState
 import com.intellij.openapi.progress.ProgressIndicator
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicInteger
 
 class TwoStageCommitGenerator(
     private val client: OkHttpSseClient,
     private val provider: ProviderConfig,
     private val apiKey: String
 ) {
+    companion object {
+        // Files <= this threshold skip Stage 1 and go directly to Stage 2 in one API call
+        private const val DIRECT_THRESHOLD = 3
+    }
+
     suspend fun generate(
         files: List<CommitPromptFile>,
         settings: SettingsState,
-        indicator: ProgressIndicator
+        indicator: ProgressIndicator,
+        onToken: (String) -> Unit = {}
     ): Result<String> = withContext(Dispatchers.IO) {
         val analyzer = DiffAnalyzer()
         val analysisResult = analyzer.analyze(files, settings)
@@ -26,34 +35,72 @@ class TwoStageCommitGenerator(
 
         if (analysisResult.level == DiffAnalyzer.CompressionLevel.STATS) {
             // STATS level: skip Stage 1, generate directly from stats
-            return@withContext generateFromStats(analysisResult, settings, indicator)
+            return@withContext generateFromStats(analysisResult, settings, indicator, onToken)
         }
 
-        // FULL level: two-stage generation
-        return@withContext generateTwoStage(analysisResult, settings, indicator)
+        // FULL level: use direct path for small commits, two-stage for larger ones
+        val filteredFiles = DiffAnalyzer().filterFiles(analysisResult, settings)
+        return@withContext if (filteredFiles.size <= DIRECT_THRESHOLD) {
+            generateDirect(filteredFiles, files, settings, indicator, onToken)
+        } else {
+            generateTwoStage(filteredFiles, files, settings, indicator, onToken)
+        }
+    }
+
+    private suspend fun generateDirect(
+        filteredFiles: List<DiffAnalyzer.FileChange>,
+        originalFiles: List<CommitPromptFile>,
+        settings: SettingsState,
+        indicator: ProgressIndicator,
+        onToken: (String) -> Unit
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val fileMap = originalFiles.associateBy { it.path }
+        val promptFiles = filteredFiles.mapNotNull { fileMap[it.path] }
+
+        indicator.text = "生成 Commit Message..."
+
+        val diffContent = CommitPromptBuilder.buildDiffPreview(promptFiles)
+        val messages = listOf(
+            Message(MessageRole.SYSTEM, CommitPromptBuilder.buildStage2Prompt(settings.commitLanguage)),
+            Message(MessageRole.USER, CommitPromptBuilder.buildSingleStageUserMessage(diffContent, settings.commitLanguage))
+        )
+
+        val request = client.buildRequest(
+            config = provider,
+            apiKey = apiKey,
+            messages = messages,
+            temperature = 0.3,
+            maxTokens = 500,
+            stream = true
+        )
+
+        return@withContext client.streamCommit(request, onToken)
     }
 
     private suspend fun generateTwoStage(
-        result: DiffAnalyzer.AnalysisResult,
+        filteredFiles: List<DiffAnalyzer.FileChange>,
+        originalFiles: List<CommitPromptFile>,
         settings: SettingsState,
-        indicator: ProgressIndicator
+        indicator: ProgressIndicator,
+        onToken: (String) -> Unit
     ): Result<String> = withContext(Dispatchers.IO) {
-        val filteredFiles = DiffAnalyzer().filterFiles(result, settings)
+        val fileMap = originalFiles.associateBy { it.path }
 
-        indicator.text = "Stage 1: 生成文件摘要..."
+        val total = filteredFiles.size
+        val completed = AtomicInteger(0)
+        indicator.text = "Stage 1: 生成文件摘要 (0/$total)..."
 
-        // Stage 1: Generate per-file summaries
-        val summaries = mutableListOf<String>()
-        for (file in filteredFiles) {
-            if (indicator.isCanceled) {
-                return@withContext Result.failure(Exception("已取消"))
+        // Stage 1: Generate per-file summaries concurrently
+        val summaries = filteredFiles
+            .map { file ->
+                async {
+                    val summary = generateFileSummary(file, fileMap[file.path], settings, indicator)
+                    indicator.text = "Stage 1: 生成文件摘要 (${completed.incrementAndGet()}/$total)..."
+                    summary
+                }
             }
-
-            val summary = generateFileSummary(file, settings, indicator)
-            if (summary != null) {
-                summaries.add(summary)
-            }
-        }
+            .awaitAll()
+            .filterNotNull()
 
         if (summaries.isEmpty()) {
             return@withContext Result.failure(Exception("无法生成文件摘要"))
@@ -73,16 +120,17 @@ class TwoStageCommitGenerator(
             messages = stage2Messages,
             temperature = 0.3,
             maxTokens = 500,
-            stream = false
+            stream = true
         )
 
-        return@withContext client.callCommitSync(stage2Request)
+        return@withContext client.streamCommit(stage2Request, onToken)
     }
 
     private suspend fun generateFromStats(
         result: DiffAnalyzer.AnalysisResult,
         settings: SettingsState,
-        indicator: ProgressIndicator
+        indicator: ProgressIndicator,
+        onToken: (String) -> Unit = {}
     ): Result<String> = withContext(Dispatchers.IO) {
         val filteredFiles = DiffAnalyzer().filterFiles(result, settings)
         val statsSummary = DiffAnalyzer().buildStatsSummary(filteredFiles)
@@ -92,13 +140,14 @@ class TwoStageCommitGenerator(
             Message(
                 MessageRole.USER,
                 CommitPromptBuilder.buildStatsUserMessage(
-                    filteredFiles.map {
-                        DiffAnalyzer.FileChange(it.path, it.additions, it.deletions, it.changeType)
-                    },
+                    filteredFiles,
+                    statsSummary,
                     settings.commitLanguage
                 )
             )
         )
+
+        indicator.text = "生成 Commit Message..."
 
         val request = client.buildRequest(
             config = provider,
@@ -106,22 +155,29 @@ class TwoStageCommitGenerator(
             messages = messages,
             temperature = 0.3,
             maxTokens = 500,
-            stream = false
+            stream = true
         )
 
-        return@withContext client.callCommitSync(request)
+        return@withContext client.streamCommit(request, onToken)
     }
 
     private suspend fun generateFileSummary(
         file: DiffAnalyzer.FileChange,
+        originalFile: CommitPromptFile?,
         settings: SettingsState,
         indicator: ProgressIndicator
     ): String? = withContext(Dispatchers.IO) {
-        indicator.text = "摘要: ${file.path}"
+        if (indicator.isCanceled) return@withContext null
+
+        val userMessage = if (originalFile != null) {
+            CommitPromptBuilder.buildSingleFilePrompt(originalFile)
+        } else {
+            CommitPromptBuilder.buildSingleFilePrompt(file)
+        }
 
         val messages = listOf(
             Message(MessageRole.SYSTEM, CommitPromptBuilder.buildStage1Prompt()),
-            Message(MessageRole.USER, CommitPromptBuilder.buildSingleFilePrompt(file))
+            Message(MessageRole.USER, userMessage)
         )
 
         val request = client.buildRequest(

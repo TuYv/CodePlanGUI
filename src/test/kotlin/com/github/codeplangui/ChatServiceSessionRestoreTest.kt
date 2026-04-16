@@ -1,6 +1,9 @@
 package com.github.codeplangui
 
+import com.github.codeplangui.model.Message
+import com.github.codeplangui.model.MessageRole
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class ChatServiceSessionRestoreTest {
@@ -77,5 +80,59 @@ class ChatServiceSessionRestoreTest {
             enqueue = { action -> action() }
         )
         assertEquals(true, executed)
+    }
+
+    @Test
+    fun `filterRestorableMessages keeps user and assistant messages`() {
+        val messages = listOf(
+            Message(MessageRole.USER, "hello", id = "1"),
+            Message(MessageRole.ASSISTANT, "hi there", id = "2")
+        )
+        val result = filterRestorableMessages(messages)
+        assertEquals(2, result.size)
+    }
+
+    @Test
+    fun `filterRestorableMessages filters out system messages`() {
+        val messages = listOf(
+            Message(MessageRole.SYSTEM, "you are a helper", id = "0"),
+            Message(MessageRole.USER, "hello", id = "1"),
+            Message(MessageRole.ASSISTANT, "hi", id = "2")
+        )
+        val result = filterRestorableMessages(messages)
+        assertEquals(2, result.size)
+        assertTrue(result.none { it.role == MessageRole.SYSTEM })
+    }
+
+    @Test
+    fun `filterRestorableMessages filters out tool messages`() {
+        val messages = listOf(
+            Message(MessageRole.USER, "run ls", id = "1"),
+            Message(MessageRole.TOOL, "file1.txt", toolCallId = "tc1", id = "2"),
+            Message(MessageRole.ASSISTANT, "here are your files", id = "3")
+        )
+        val result = filterRestorableMessages(messages)
+        assertEquals(2, result.size)
+        assertTrue(result.none { it.role == MessageRole.TOOL })
+    }
+
+    @Test
+    fun `filterRestorableMessages filters out blank assistant messages`() {
+        val messages = listOf(
+            Message(MessageRole.USER, "hello", id = "1"),
+            Message(MessageRole.ASSISTANT, "", id = "2"),
+            Message(MessageRole.ASSISTANT, "  ", id = "3"),
+            Message(MessageRole.ASSISTANT, "real response", id = "4")
+        )
+        val result = filterRestorableMessages(messages)
+        assertEquals(2, result.size)
+        assertEquals("hello", result[0].content)
+        assertEquals("real response", result[1].content)
+    }
+
+    @Test
+    fun `filterRestorableMessages returns empty for empty input`() {
+        val result = filterRestorableMessages(emptyList())
+        assertTrue(result.isEmpty())
     }
 }

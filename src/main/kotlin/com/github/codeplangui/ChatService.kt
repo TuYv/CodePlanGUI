@@ -211,7 +211,7 @@ class ChatService(private val project: Project) : Disposable {
 
     fun askAboutSelection(selection: String, contextLabel: String) {
         val prompt = buildSelectionPrompt(selection)
-        if (bridgeHandler?.isReady == true && isFrontendReady) {
+        if (!shouldQueuePrompt(bridgeHandler?.isReady == true, isFrontendReady)) {
             sendMessage(prompt, false, contextLabel)
         } else {
             pendingPrompt = PendingPrompt(prompt, false, contextLabel)
@@ -670,9 +670,7 @@ $selection
         val data = sessionStore.loadSession() ?: return
         session = ChatSession(data.threadId)
         data.messages.forEach { session.add(it) }
-        val restoredMessages = data.messages
-            .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT }
-            .filterNot { it.role == MessageRole.ASSISTANT && it.content.isBlank() }
+        val restoredMessages = filterRestorableMessages(data.messages)
             .map {
                 RestoredMessagePayload(
                     id = it.id,
@@ -707,6 +705,9 @@ $selection
 
     companion object {
         fun getInstance(project: Project): ChatService = project.getService(ChatService::class.java)
+
+        internal fun shouldQueuePrompt(bridgeReady: Boolean, frontendReady: Boolean): Boolean =
+            !(bridgeReady && frontendReady)
     }
 
     private data class PendingPrompt(
@@ -841,3 +842,9 @@ internal fun deriveConnectionState(
     !hasApiKey -> "error"
     else -> "ready"
 }
+
+internal fun filterRestorableMessages(
+    messages: List<Message>
+): List<Message> = messages
+    .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT }
+    .filterNot { it.role == MessageRole.ASSISTANT && it.content.isBlank() }

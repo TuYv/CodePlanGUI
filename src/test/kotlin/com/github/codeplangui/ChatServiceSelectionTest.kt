@@ -28,4 +28,24 @@ class ChatServiceSelectionTest {
         val label = buildSelectionContextLabel("Test.kt", 0)
         assertEquals("Test.kt · 选中 1 行", label)
     }
+
+    @Test
+    fun `shouldQueuePrompt returns false when both bridge and frontend ready`() {
+        assertEquals(false, ChatService.shouldQueuePrompt(bridgeReady = true, frontendReady = true))
+    }
+
+    @Test
+    fun `shouldQueuePrompt returns true when bridge not ready`() {
+        assertEquals(true, ChatService.shouldQueuePrompt(bridgeReady = false, frontendReady = true))
+    }
+
+    @Test
+    fun `shouldQueuePrompt returns true when frontend not ready`() {
+        assertEquals(true, ChatService.shouldQueuePrompt(bridgeReady = true, frontendReady = false))
+    }
+
+    @Test
+    fun `shouldQueuePrompt returns true when both not ready`() {
+        assertEquals(true, ChatService.shouldQueuePrompt(bridgeReady = false, frontendReady = false))
+    }
 }

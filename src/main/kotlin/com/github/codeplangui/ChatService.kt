@@ -77,6 +77,13 @@ class ChatService(private val project: Project) : Disposable {
         isFrontendReady = false
     }
 
+    /**
+     * Bridge lifecycle contract — called when frontend sends "frontendReady":
+     *   1. publishStatus()              → push provider/model/connectionState
+     *   2. restoreSessionIfNeeded()     → replay persisted messages
+     *   3. onFrontendReadyCallback()    → ChatPanel pushes theme + contextFile
+     *   4. flush pendingPrompt          → dequeues Ask AI prompts queued before bridge ready
+     */
     fun onFrontendReady() {
         isFrontendReady = true
         publishStatus()
@@ -105,14 +112,22 @@ class ChatService(private val project: Project) : Disposable {
         val provider = settings.getActiveProvider()
         if (provider == null) {
             publishStatus()
-            bridgeHandler?.notifyError("请先在 Settings > Tools > CodePlanGUI 中配置 API Provider")
+            bridgeHandler?.notifyStructuredError(BridgeErrorPayload(
+                type = "config",
+                message = "请先在 Settings > Tools > CodePlanGUI 中配置 API Provider",
+                action = "openSettings"
+            ))
             return
         }
 
         val apiKey = ApiKeyStore.load(provider.id) ?: ""
         if (apiKey.isBlank()) {
             publishStatus()
-            bridgeHandler?.notifyError("API Key 未设置或未保存，请在 Settings 中重新配置并点 Apply/OK")
+            bridgeHandler?.notifyStructuredError(BridgeErrorPayload(
+                type = "config",
+                message = "API Key 未设置或未保存，请在 Settings 中重新配置并点 Apply/OK",
+                action = "openSettings"
+            ))
             return
         }
 
@@ -196,7 +211,7 @@ class ChatService(private val project: Project) : Disposable {
 
     fun askAboutSelection(selection: String, contextLabel: String) {
         val prompt = buildSelectionPrompt(selection)
-        if (bridgeHandler?.isReady == true && isFrontendReady) {
+        if (!shouldQueuePrompt(bridgeHandler?.isReady == true, isFrontendReady)) {
             sendMessage(prompt, false, contextLabel)
         } else {
             pendingPrompt = PendingPrompt(prompt, false, contextLabel)
@@ -378,7 +393,10 @@ $selection
         bridgeNotifiedStart.remove(msgId)
         resetToolCallState()
         publishStatus()
-        bridgeHandler?.notifyError(errorMessage)
+        bridgeHandler?.notifyStructuredError(BridgeErrorPayload(
+            type = "runtime",
+            message = errorMessage
+        ))
     }
 
     private fun startStreamingRound(msgId: String, request: okhttp3.Request, toolsEnabled: Boolean) {
@@ -430,7 +448,7 @@ $selection
                         activeMessageId = null
                         bridgeNotifiedStart.remove(msgId)
                         publishStatus()
-                        bridgeHandler?.notifyError(message)
+                        bridgeHandler?.notifyStructuredError(classifyStreamError(message))
                     }
                 },
                 onToolCallChunk = { delta ->
@@ -652,9 +670,7 @@ $selection
         val data = sessionStore.loadSession() ?: return
         session = ChatSession(data.threadId)
         data.messages.forEach { session.add(it) }
-        val restoredMessages = data.messages
-            .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT }
-            .filterNot { it.role == MessageRole.ASSISTANT && it.content.isBlank() }
+        val restoredMessages = filterRestorableMessages(data.messages)
             .map {
                 RestoredMessagePayload(
                     id = it.id,
@@ -670,8 +686,28 @@ $selection
         )
     }
 
+    private fun classifyStreamError(message: String): BridgeErrorPayload {
+        val lowerMsg = message.lowercase()
+        return when {
+            lowerMsg.contains("401") || lowerMsg.contains("403") ||
+            lowerMsg.contains("api key") || lowerMsg.contains("unauthorized") ->
+                BridgeErrorPayload(type = "config", message = message, action = "openSettings")
+
+            lowerMsg.contains("timeout") || lowerMsg.contains("超时") ||
+            lowerMsg.contains("无法连接") || lowerMsg.contains("connectexception") ||
+            lowerMsg.contains("http 5") || lowerMsg.contains("http 429") ->
+                BridgeErrorPayload(type = "network", message = message, action = "retry")
+
+            else ->
+                BridgeErrorPayload(type = "runtime", message = message)
+        }
+    }
+
     companion object {
         fun getInstance(project: Project): ChatService = project.getService(ChatService::class.java)
+
+        internal fun shouldQueuePrompt(bridgeReady: Boolean, frontendReady: Boolean): Boolean =
+            !(bridgeReady && frontendReady)
     }
 
     private data class PendingPrompt(
@@ -806,3 +842,9 @@ internal fun deriveConnectionState(
     !hasApiKey -> "error"
     else -> "ready"
 }
+
+internal fun filterRestorableMessages(
+    messages: List<Message>
+): List<Message> = messages
+    .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT }
+    .filterNot { it.role == MessageRole.ASSISTANT && it.content.isBlank() }

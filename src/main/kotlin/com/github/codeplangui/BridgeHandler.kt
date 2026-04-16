@@ -87,6 +87,13 @@ data class BridgeStatusPayload(
     val connectionState: String = "unconfigured"
 )
 
+@Serializable
+data class BridgeErrorPayload(
+    val type: String,
+    val message: String,
+    val action: String? = null
+)
+
 class BridgeHandler(
     private val browser: JBCefBrowser,
     private val chatService: ChatService
@@ -183,11 +190,31 @@ class BridgeHandler(
                             onExecutionCard: function(requestId, command, description) {},
                             onLog: function(msgId, logLine, type) {},
                             onExecutionStatus: function(requestId, status, result) {},
-                            onRestoreMessages: function(messages) {}
+                            onRestoreMessages: function(messages) {},
+                            onStructuredError: function(error) {}
                         };
                         document.dispatchEvent(new Event('bridge_ready'));
                     """.trimIndent()
                     browser.executeJavaScript(js, "", 0)
+
+                    // Prevent JCEF WebView freeze on Ctrl+C/Cmd+C by intercepting
+                    // the keyboard event and using async clipboard API instead of
+                    // letting CEF handle it synchronously. Ref: jetbrains-cc-gui #846
+                    val clipboardJs = """
+                        document.addEventListener('keydown', function(e) {
+                            if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+                                var selection = window.getSelection();
+                                if (selection && selection.toString().length > 0) {
+                                    e.preventDefault();
+                                    var text = selection.toString();
+                                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                                        navigator.clipboard.writeText(text).catch(function() {});
+                                    }
+                                }
+                            }
+                        }, true);
+                    """.trimIndent()
+                    browser.executeJavaScript(clipboardJs, "", 0)
                 }
             }
         }, browser.cefBrowser)
@@ -200,6 +227,9 @@ class BridgeHandler(
     fun notifyEnd(msgId: String) = pushJS("window.__bridge.onEnd(${msgId.quoted()})")
 
     fun notifyError(message: String) = pushJS("window.__bridge.onError(${json.encodeToString(message)})")
+
+    fun notifyStructuredError(error: BridgeErrorPayload) =
+        pushJS("window.__bridge.onStructuredError(${json.encodeToString(error)})")
 
     fun notifyStatus(status: BridgeStatusPayload) =
         pushJS("window.__bridge.onStatus(${json.encodeToString(status)})")
@@ -256,7 +286,10 @@ class BridgeHandler(
         pushJS("window.__bridge.onRestoreMessages(${json.encodeToString(messages)})")
 
     private fun pushJS(js: String) {
-        if (!isReady) return
+        if (!isReady) {
+            logger.debug("[CodePlanGUI Bridge] pushJS discarded (bridge not ready): ${js.take(120)}")
+            return
+        }
         ApplicationManager.getApplication().invokeLater {
             browser.cefBrowser.executeJavaScript(js, "", 0)
         }

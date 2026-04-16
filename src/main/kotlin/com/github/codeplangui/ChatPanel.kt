@@ -61,7 +61,6 @@ class ChatPanel(project: Project) : JPanel(BorderLayout()), Disposable {
                 override fun lookAndFeelChanged(source: LafManager) {
                     val isDark = StartupUiUtil.isUnderDarcula()
                     pushTheme(isDark)
-                    br.notifyContextFile(currentContextFile)
                 }
             })
         }

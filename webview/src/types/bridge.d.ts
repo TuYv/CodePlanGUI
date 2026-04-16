@@ -16,6 +16,12 @@ export interface ExecutionResult {
   timeout_seconds?: number
 }
 
+export interface BridgeError {
+  type: 'config' | 'network' | 'runtime'
+  message: string
+  action?: 'openSettings' | 'retry'
+}
+
 export interface Bridge {
   isReady: boolean
   sendMessage: (text: string, includeContext: boolean) => void
@@ -28,6 +34,7 @@ export interface Bridge {
   onToken: (token: string) => void
   onEnd: (msgId: string) => void
   onError: (message: string) => void
+  onStructuredError: (error: BridgeError) => void
   onStatus: (status: BridgeStatus) => void
   onContextFile: (fileName: string) => void
   onTheme: (theme: 'dark' | 'light') => void

@@ -34,4 +34,6 @@ jobs:
           OPENAI_API_BASE: https://ark.cn-beijing.volces.com/api/coding/v3
           CONFIG__AI_PROVIDER: openai
           CONFIG__MODEL: MiniMax-M2.5
+          CONFIG__MODEL_WEAK: MiniMax-M2.5
+          CONFIG__FALLBACK_MODELS: MiniMax-M2.5
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

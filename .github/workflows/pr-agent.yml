@@ -1,8 +1,8 @@
 name: PR-Agent
 
 on:
-  pull_request:
-    types: [opened, reopened, ready_for_review]
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, synchronize]
   pull_request_review_comment:
     types: [created]
   issue_comment:
@@ -15,7 +15,15 @@ permissions:
 
 jobs:
   pr_agent:
-    if: ${{ github.event.sender.type != 'Bot' }}
+    # Only run for trusted authors. External contributors' fork PRs will be
+    # skipped to avoid leaking secrets via workflow injection.
+    if: >
+      github.event.sender.type != 'Bot' &&
+      (github.event.pull_request.author_association == 'OWNER' ||
+       github.event.pull_request.author_association == 'MEMBER' ||
+       github.event.pull_request.author_association == 'COLLABORATOR' ||
+       github.event_name == 'issue_comment' ||
+       github.event_name == 'pull_request_review_comment')
     runs-on: ubuntu-latest
     name: Run PR-Agent
     steps:
@@ -24,6 +32,6 @@ jobs:
         env:
           OPENAI_KEY: ${{ secrets.api_key }}
           OPENAI_API_BASE: https://ark.cn-beijing.volces.com/api/coding/v3
-          CONFIG.AI_PROVIDER: openai
-          CONFIG.MODEL: MiniMax-M2.5
+          CONFIG__AI_PROVIDER: openai
+          CONFIG__MODEL: MiniMax-M2.5
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -146,7 +146,7 @@ class BridgeHandler(
                 }
                 is BridgePayloadHandlingResult.CommandError -> {
                     logger.warn(result.message, result.cause)
-                    notifyError(result.message)
+                    notifyError("generic", result.message)
                     null
                 }
             }
@@ -156,6 +156,7 @@ class BridgeHandler(
             override fun onLoadEnd(browser: CefBrowser, frame: CefFrame, httpStatusCode: Int) {
                 if (frame.isMain) {
                     isReady = true
+                    logger.warn("[CodePlanGUI Bridge] onLoadEnd fired, isReady=true, setting up window.__bridge")
                     chatService.attachBridge(this@BridgeHandler)
                     val js = """
                         window.__bridge = {
@@ -225,11 +226,14 @@ class BridgeHandler(
 
     fun notifyStart(msgId: String) = pushJS("window.__bridge.onStart(${msgId.quoted()})")
 
-    fun notifyToken(token: String) = pushJS("window.__bridge.onToken(${json.encodeToString(token)})")
+    fun notifyToken(token: String) = pushJS("window.__bridge.onToken(${token.quoted()})")
 
     fun notifyEnd(msgId: String) = pushJS("window.__bridge.onEnd(${msgId.quoted()})")
 
-    fun notifyError(message: String) = pushJS("window.__bridge.onError(${json.encodeToString(message)})")
+    fun notifyError(errorType: String, message: String) {
+        logger.warn("[CodePlanGUI Bridge] notifyError: type=$errorType, message=${message.take(80)}")
+        pushJS("window.__bridge.onError(${errorType.quoted()}, ${message.quoted()})")
+    }
 
     fun notifyStructuredError(error: BridgeErrorPayload) =
         pushJS("window.__bridge.onStructuredError(${json.encodeToString(error)})")
@@ -238,10 +242,10 @@ class BridgeHandler(
         pushJS("window.__bridge.onStatus(${json.encodeToString(status)})")
 
     fun notifyContextFile(fileName: String) =
-        pushJS("window.__bridge.onContextFile(${json.encodeToString(fileName)})")
+        pushJS("window.__bridge.onContextFile(${fileName.quoted()})")
 
     fun notifyTheme(theme: String) =
-        pushJS("window.__bridge.onTheme(${json.encodeToString(theme)})")
+        pushJS("window.__bridge.onTheme(${theme.quoted()})")
 
     fun notifyLog(msgId: String, logLine: String, type: String) =
         pushJS(
@@ -286,7 +290,7 @@ class BridgeHandler(
         }
 
     fun notifyRestoreMessages(messages: String) =
-        pushJS("window.__bridge.onRestoreMessages(${json.encodeToString(messages)})")
+        pushJS("window.__bridge.onRestoreMessages($messages)")
 
     fun notifyContinuation(current: Int, max: Int) =
         pushJS("window.__bridge.onContinuation($current, $max)")

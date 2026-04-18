@@ -86,6 +86,15 @@ sealed class TestResult {
     data class Failure(val message: String) : TestResult()
 }
 
+/**
+ * Classified API error with type tag for frontend differentiation.
+ * type: "auth" | "quota" | "temp" | "generic"
+ */
+data class ClassifiedError(
+    val type: String,
+    val message: String
+)
+
 private const val STREAM_DEBUG_MAX_LENGTH = 1200
 
 internal fun summarizeInterestingSseFrame(id: String?, type: String?, data: String): String? {
@@ -176,7 +185,7 @@ class OkHttpSseClient(
         request: Request,
         onToken: (String) -> Unit,
         onEnd: () -> Unit,
-        onError: (String) -> Unit,
+        onError: (ClassifiedError) -> Unit,
         onToolCallChunk: (ToolCallDelta) -> Unit = {},
         onFinishReason: (String) -> Unit = {}
     ): EventSource {
@@ -210,7 +219,8 @@ class OkHttpSseClient(
                 } else {
                     buildErrorMessage(response, t, responseBody = peeked)
                 }
-                onError(msg)
+                val errorType = classifyErrorType(msg)
+                onError(ClassifiedError(type = errorType, message = msg))
             }
         }
         return eventSourceFactory.newEventSource(request, listener)
@@ -234,7 +244,7 @@ class OkHttpSseClient(
                     if (cont.isActive) cont.resume(Result.success(accumulated.toString()))
                 },
                 onError = { error ->
-                    if (cont.isActive) cont.resume(Result.failure(Exception(error)))
+                    if (cont.isActive) cont.resume(Result.failure(Exception(error.message)))
                 }
             )
             cont.invokeOnCancellation { source.cancel() }
@@ -319,6 +329,18 @@ class OkHttpSseClient(
             TestResult.Failure("无法连接：请检查 endpoint URL")
         } catch (e: Exception) {
             TestResult.Failure(e.message ?: "未知错误")
+        }
+    }
+
+    /**
+     * Classifies a raw error message into a typed error for frontend display.
+     */
+    fun classifyErrorType(rawMessage: String): String {
+        return when {
+            QUOTA_PATTERNS.any { it in rawMessage.lowercase() } -> "quota"
+            AUTH_PATTERNS.any { it in rawMessage.lowercase() } -> "auth"
+            BUSY_PATTERNS.any { it in rawMessage.lowercase() } -> "temp"
+            else -> "generic"
         }
     }
 

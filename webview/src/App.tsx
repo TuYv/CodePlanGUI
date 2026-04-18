@@ -23,7 +23,8 @@ export default function App() {
   const isComposingRef = useRef(false)
   const [isLoading, setIsLoading] = useState(false)
   const [includeContext, setIncludeContext] = useState(true)
-  const [error, setError] = useState<BridgeError | null>(null)
+  const [errorType, setErrorType] = useState<string | null>(null)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [status, setStatus] = useState<BridgeStatus>({
     providerName: '',
     model: '',
@@ -32,6 +33,7 @@ export default function App() {
   })
   const [themeMode, setThemeMode] = useState<'dark' | 'light'>('dark')
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const lastUserMessageRef = useRef<{ text: string; includeContext: boolean } | null>(null)
   const [approvalOpen, setApprovalOpen] = useState(false)
   const [approvalRequestId, setApprovalRequestId] = useState('')
   const [approvalCommand, setApprovalCommand] = useState('')
@@ -54,7 +56,8 @@ export default function App() {
 
   const onStart = useCallback((msgId: string) => {
     setIsLoading(true)
-    setError(null)
+    setErrorType(null)
+    setErrorMessage(null)
     setMessages((prev) => [
       ...prev,
       { id: msgId, role: 'assistant', content: '', isStreaming: true },
@@ -77,13 +80,15 @@ export default function App() {
     )
   }, [])
 
-  const onError = useCallback((message: string) => {
+  const onError = useCallback((type: string, message: string) => {
+    console.log('[CodePlanGUI] onError called:', { type, message })
     setIsLoading(false)
     setContinuationInfo(null)
     setMessages((prev) =>
       prev.map((item) => (item.isStreaming ? { ...item, isStreaming: false } : item)),
     )
-    setError({ type: 'runtime', message })
+    setErrorType(type)
+    setErrorMessage(message)
   }, [])
 
   const onStructuredError = useCallback((bridgeError: BridgeError) => {
@@ -91,7 +96,8 @@ export default function App() {
     setMessages((prev) =>
       prev.map((item) => (item.isStreaming ? { ...item, isStreaming: false } : item)),
     )
-    setError(bridgeError)
+    setErrorType(bridgeError.type)
+    setErrorMessage(bridgeError.message)
   }, [])
 
   const onContextFile = useCallback((fileName: string) => {
@@ -233,7 +239,8 @@ export default function App() {
   // Clear stale errors when the bridge reconnects (e.g., after webview reload)
   useEffect(() => {
     if (bridgeReady) {
-      setError(null)
+      setErrorType(null)
+      setErrorMessage(null)
     }
   }, [bridgeReady])
 
@@ -248,7 +255,10 @@ export default function App() {
   const handleSend = () => {
     if (!composerReadiness.canSend) {
       if (composerReadiness.reason && composerReadiness.text) {
-        setError({ type: 'runtime', message: composerReadiness.reason! })
+        // When connectionState is 'error' (API key missing), use 'auth' type to show "打开设置" button
+        const effectiveErrorType = status.connectionState === 'error' ? 'auth' : 'generic'
+        setErrorType(effectiveErrorType)
+        setErrorMessage(composerReadiness.reason!)
       }
       return
     }
@@ -257,6 +267,7 @@ export default function App() {
     if (!payload) return
 
     const userMsgId = uuidv4()
+    lastUserMessageRef.current = { text: payload.text, includeContext }
     setMessages((prev) => [...prev, { id: userMsgId, role: 'user', content: payload.text }])
     setInputText('')
     // loading + error are set in onStart (source of truth), which fires when the backend
@@ -273,7 +284,8 @@ export default function App() {
 
   const handleNewChat = () => {
     setMessages([])
-    setError(null)
+    setErrorType(null)
+    setErrorMessage(null)
     setIsLoading(false)
     window.__bridge?.newChat()
   }
@@ -282,6 +294,19 @@ export default function App() {
     if (!isLoading) return
     window.__bridge?.cancelStream()
   }, [isLoading])
+
+  const handleErrorAction = useCallback(() => {
+    const type = errorType
+    if (type === 'auth' || type === 'quota') {
+      window.__bridge?.openSettings()
+    } else if (type === 'temp' && lastUserMessageRef.current) {
+      // Retry: re-send last user message
+      const msgToRetry = lastUserMessageRef.current
+      window.__bridge?.sendMessage(msgToRetry.text, msgToRetry.includeContext)
+    }
+    setErrorType(null)
+    setErrorMessage(null)
+  }, [errorType])
 
   // ESC key to cancel streaming
   useEffect(() => {
@@ -328,7 +353,15 @@ export default function App() {
           bridgeReady={bridgeReady}
         />
 
-        {error && <ErrorBanner error={error} onClose={() => setError(null)} />}
+
+        {errorType && errorMessage && (
+          <ErrorBanner
+            errorType={errorType as 'auth' | 'quota' | 'temp' | 'generic'}
+            message={errorMessage}
+            onClose={() => { setErrorType(null); setErrorMessage(null) }}
+            onAction={handleErrorAction}
+          />
+        )}
 
         <div className="messages-area">
           {messages.length === 0 && (

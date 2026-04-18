@@ -1,5 +1,6 @@
 package com.github.codeplangui
 
+import com.github.codeplangui.api.ClassifiedError
 import com.github.codeplangui.api.FunctionDefinition
 import com.github.codeplangui.api.OkHttpSseClient
 import com.github.codeplangui.api.TestResult
@@ -170,7 +171,7 @@ class OkHttpSseClientTest {
         val client = OkHttpSseClient(eventSourceFactory = factory)
         val tokens = mutableListOf<String>()
         var ended = false
-        var error: String? = null
+        var error: ClassifiedError? = null
 
         val source = client.streamChat(
             request = simpleRequest(),
@@ -196,7 +197,7 @@ class OkHttpSseClientTest {
     fun `streamChat forwards mapped error messages`() {
         val factory = FakeEventSourceFactory()
         val client = OkHttpSseClient(eventSourceFactory = factory)
-        var error: String? = null
+        var error: ClassifiedError? = null
 
         val source = client.streamChat(
             request = simpleRequest(),
@@ -211,7 +212,7 @@ class OkHttpSseClientTest {
             responseFor(simpleRequest(), 404, "missing")
         )
 
-        assertEquals("HTTP 404：endpoint 路径不正确（应包含 /v1）", error)
+        assertEquals("HTTP 404：endpoint 路径不正确（应包含 /v1）", error?.message)
     }
 
     @Test

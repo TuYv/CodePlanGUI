@@ -60,10 +60,11 @@ Note: `round_end` is introduced in Phase 1 as a no-op placeholder so Phase 2 can
 Add a core method that produces a JS string (does not execute it — the caller decides dispatch strategy):
 
 ```kotlin
-private fun buildEventJS(type: String, payload: String): String {
-    // Use project's existing kotlinx.serialization for safe JSON encoding
-    val jsonPayload = Json.encodeToString(payload)
-    return "window.__bridge.onEvent('${type}', $jsonPayload)"
+private fun buildEventJS(type: String, payload: Map<String, Any?>): String {
+    // Use project's existing kotlinx.serialization for safe JSON encoding.
+    // Callers pass a Map (not a pre-encoded string) to avoid double-encoding issues.
+    val jsonPayload = json.encodeToString(payload)
+    return "window.__bridge.onEvent('$type', $jsonPayload)"
 }
 ```
 
@@ -93,7 +94,7 @@ Note: `pushJS` sends immediately without flushing the pending batch. This is the
 
 ```kotlin
 fun notifyRoundEnd(msgId: String) =
-    flushAndPush(buildEventJS("round_end", """{"msgId":"$msgId"}"""))
+    flushAndPush(buildEventJS("round_end", mapOf("msgId" to msgId)))
 ```
 
 This method is added in Phase 1 but not called. Phase 2 activates it.

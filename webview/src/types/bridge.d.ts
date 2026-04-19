@@ -45,6 +45,7 @@ export interface Bridge {
   onLog: (msgId: string, logLine: string, type: string) => void
   onRestoreMessages: (messages: string) => void
   onContinuation: (current: number, max: number) => void
+  onRemoveMessage: (msgId: string) => void
 }
 
 declare global {

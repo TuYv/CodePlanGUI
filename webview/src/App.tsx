@@ -211,6 +211,10 @@ export default function App() {
     setContinuationInfo({ current, max })
   }, [])
 
+  const onRemoveMessage = useCallback((msgId: string) => {
+    setMessages((prev) => prev.filter((m) => m.id !== msgId))
+  }, [])
+
   // Build theme algorithm for Ant Design
   const themeAlgorithm = themeMode === 'dark' ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm
 
@@ -229,6 +233,7 @@ export default function App() {
     onLog,
     onRestoreMessages,
     onContinuation,
+    onRemoveMessage,
   })
   // Clear stale errors when the bridge reconnects (e.g., after webview reload)
   useEffect(() => {

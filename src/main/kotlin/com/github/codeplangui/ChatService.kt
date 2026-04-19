@@ -324,8 +324,10 @@ class ChatService(private val project: Project) : Disposable {
         resetToolCallState()
         responseBuffer.clear()
 
-        // Do NOT call notifyStart here — the next model round might produce more tool calls.
-        // The assistant bubble is only created in startStreamingRound's onEnd (final round, no tool calls).
+        // Do NOT create the assistant bubble here — the next round might produce
+        // more tool calls.  The bubble is created lazily in onToken and removed
+        // in onFinishReason("tool_calls") if tool calls follow, ensuring all
+        // execution cards appear before the final streaming bubble.
         sendMessageInternal(msgId)
     }
 
@@ -414,12 +416,14 @@ $selection
                 onToken = { token ->
                     if (activeMessageId == msgId) {
                         responseBuffer.append(token)
-                        // Only push tokens to the frontend if the assistant bubble has been started.
-                        // When tools are enabled, the bubble is deferred until the final response round
-                        // so ExecutionCards appear first.
-                        if (msgId in bridgeNotifiedStart) {
-                            bridgeHandler?.notifyToken(token)
+                        // Lazily create the assistant bubble on first token.
+                        // If this round ends up producing tool_calls, onFinishReason will
+                        // remove the bubble so execution cards stay in front.
+                        if (msgId !in bridgeNotifiedStart) {
+                            bridgeHandler?.notifyStart(msgId)
+                            bridgeNotifiedStart.add(msgId)
                         }
+                        bridgeHandler?.notifyToken(token)
                     }
                 },
                 onEnd = {
@@ -465,8 +469,14 @@ $selection
                 },
                 onFinishReason = { reason ->
                     if (toolsEnabled && reason == "tool_calls" && activeMessageId == msgId) {
-                        // Tool calls detected — do NOT start the bubble.
-                        // The first round's buffered text (usually empty) is discarded.
+                        // Remove the assistant bubble if it was already created by the
+                        // lazy init in onToken.  This guarantees that execution cards
+                        // (pushed during handleToolCallComplete) always appear before
+                        // the final assistant bubble.
+                        if (msgId in bridgeNotifiedStart) {
+                            bridgeHandler?.notifyRemoveMessage(msgId)
+                            bridgeNotifiedStart.remove(msgId)
+                        }
                         val capturedBuffer = responseBuffer
                         scope.launch { handleToolCallComplete(msgId, capturedBuffer) }
                     }

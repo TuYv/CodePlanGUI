@@ -16,6 +16,7 @@ interface BridgeCallbacks {
   onLog: (msgId: string, logLine: string, type: string) => void
   onRestoreMessages: (messages: string) => void
   onContinuation: (current: number, max: number) => void
+  onRemoveMessage: (msgId: string) => void
 }
 
 export function useBridge(callbacks: BridgeCallbacks) {
@@ -43,6 +44,7 @@ export function useBridge(callbacks: BridgeCallbacks) {
     window.__bridge.onLog = callbacks.onLog
     window.__bridge.onRestoreMessages = callbacks.onRestoreMessages
     window.__bridge.onContinuation = callbacks.onContinuation
+    window.__bridge.onRemoveMessage = callbacks.onRemoveMessage
   }, [callbacks])
 
   useEffect(() => {
@@ -72,6 +74,7 @@ export function useBridge(callbacks: BridgeCallbacks) {
           onLog: currentCallbacks.onLog,
           onRestoreMessages: currentCallbacks.onRestoreMessages,
           onContinuation: currentCallbacks.onContinuation,
+          onRemoveMessage: currentCallbacks.onRemoveMessage,
         }
       } else {
         window.__bridge.onStart = currentCallbacks.onStart
@@ -88,6 +91,7 @@ export function useBridge(callbacks: BridgeCallbacks) {
         window.__bridge.onLog = currentCallbacks.onLog
         window.__bridge.onRestoreMessages = currentCallbacks.onRestoreMessages
         window.__bridge.onContinuation = currentCallbacks.onContinuation
+        window.__bridge.onRemoveMessage = currentCallbacks.onRemoveMessage
       }
 
       const isReady = window.__bridge.isReady === true

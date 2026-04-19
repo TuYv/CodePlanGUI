@@ -113,6 +113,7 @@ class BridgeHandler(
     private val pendingJs: Queue<String> = ConcurrentLinkedQueue()
     private val flushPending = AtomicBoolean(false)
     private val flushTimer = Timer("bridge-flush", true)
+    private val flushLock = Any()
 
     fun register() {
         sendQuery = JBCefJSQuery.create(browser as JBCefBrowserBase)
@@ -352,13 +353,15 @@ class BridgeHandler(
      * Called from the flush timer thread or from [flushAndPush].
      */
     internal fun flushPendingBuffer() {
-        val batch = mutableListOf<String>()
-        while (true) {
-            val item = pendingJs.poll() ?: break
-            batch.add(item)
-        }
-        if (batch.isNotEmpty()) {
-            executeJS(batch.joinToString(";"))
+        synchronized(flushLock) {
+            val batch = mutableListOf<String>()
+            while (true) {
+                val item = pendingJs.poll() ?: break
+                batch.add(item)
+            }
+            if (batch.isNotEmpty()) {
+                executeJS(batch.joinToString(";"))
+            }
         }
     }
 
@@ -380,6 +383,14 @@ class BridgeHandler(
         } catch (e: Exception) {
             logger.debug("[CodePlanGUI Bridge] executeJS failed: ${e.message}")
         }
+    }
+
+    /**
+     * Cancel the flush timer and drain any remaining pending JS calls.
+     */
+    fun dispose() {
+        flushTimer.cancel()
+        flushPendingBuffer()
     }
 
     companion object {

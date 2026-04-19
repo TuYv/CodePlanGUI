@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test": "tsc -p tsconfig.test.json && node --test test/sendState.test.mjs test/statusState.test.mjs test/composerState.test.mjs test/contextState.test.mjs test/executionCard.test.mjs test/executionStatus.test.mjs",
+    "test": "tsc -p tsconfig.test.json && node --test test/sendState.test.mjs test/statusState.test.mjs test/composerState.test.mjs test/contextState.test.mjs test/executionCard.test.mjs test/executionStatus.test.mjs test/eventReducer.test.mjs",
     "postbuild": "node scripts/copy-dist.mjs",
     "preview": "vite preview"
   },

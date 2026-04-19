@@ -8,6 +8,7 @@ import { Marked } from 'marked'
 import { markedHighlight } from 'marked-highlight'
 import type { ExecutionCardData } from './ExecutionCard'
 import { ExecutionCard } from './ExecutionCard'
+import type { Message } from '../eventReducer'
 
 const marked = new Marked(
   markedHighlight({
@@ -19,13 +20,7 @@ const marked = new Marked(
   }),
 )
 
-export interface Message {
-  id: string
-  role: 'user' | 'assistant' | 'execution'
-  content: string
-  isStreaming?: boolean
-  execution?: ExecutionCardData
-}
+export type { Message } from '../eventReducer'
 
 interface MessageBubbleProps {
   message: Message

@@ -5,7 +5,7 @@
     "outDir": "build-tests",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "lib": ["ES2022"],
+    "lib": ["ES2022", "DOM"],
     "allowImportingTsExtensions": false
   },
   "include": [
@@ -14,6 +14,7 @@
     "src/composerState.ts",
     "src/contextState.ts",
     "src/executionStatus.ts",
-    "src/components/ExecutionCard.tsx"
+    "src/components/ExecutionCard.tsx",
+    "src/eventReducer.ts"
   ]
 }

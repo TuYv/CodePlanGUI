@@ -72,10 +72,9 @@ class ChatService(private val project: Project) : Disposable {
     private val pendingApprovals = ConcurrentHashMap<String, CompletableFuture<Boolean>>()
     private val pendingApprovalCommands = ConcurrentHashMap<String, String>()
 
-    // Tracks which msgIds have had notifyStart sent to the frontend
-    // When tools are enabled, notifyStart is deferred until the final response round
-    // so ExecutionCards appear before the assistant bubble
-    private val bridgeNotifiedStart = mutableSetOf<String>()
+    // NOTE: bridgeNotifiedStart removed in Phase 2 — notifyStart is now sent
+    // unconditionally at the start of each streaming round, and round_end replaces
+    // the old remove_message hack for discarding intermediate tokens.
 
     fun attachBridge(handler: BridgeHandler) {
         bridgeHandler = handler
@@ -178,12 +177,7 @@ class ChatService(private val project: Project) : Disposable {
             tools = if (commandExecutionEnabled) listOf(runCommandToolDefinition()) else null
         )
 
-        // When tools are enabled, defer notifyStart so ExecutionCards appear before the assistant bubble.
-        // The bubble is created only on the final response round (no tool calls).
-        if (!commandExecutionEnabled) {
-            bridgeHandler?.notifyStart(msgId)
-            bridgeNotifiedStart.add(msgId)
-        }
+        // notifyStart is now sent unconditionally in startStreamingRound() (Phase 2).
         startStreamingRound(msgId, request, toolsEnabled = commandExecutionEnabled)
     }
 
@@ -194,7 +188,6 @@ class ChatService(private val project: Project) : Disposable {
         val msgId = activeMessageId
         activeMessageId = null
         if (wasStreaming && msgId != null) {
-            bridgeNotifiedStart.remove(msgId)
             publishStatus()
             bridgeHandler?.notifyEnd(msgId)
         }
@@ -206,7 +199,6 @@ class ChatService(private val project: Project) : Disposable {
         activeMessageId = null
         truncationHandler.reset()
         resetToolCallState()
-        bridgeNotifiedStart.clear()
         session = ChatSession()
         pendingApprovals.values.forEach { it.complete(false) }
         pendingApprovals.clear()
@@ -324,10 +316,9 @@ class ChatService(private val project: Project) : Disposable {
         resetToolCallState()
         responseBuffer.clear()
 
-        // Do NOT create the assistant bubble here — the next round might produce
-        // more tool calls.  The bubble is created lazily in onToken and removed
-        // in onFinishReason("tool_calls") if tool calls follow, ensuring all
-        // execution cards appear before the final streaming bubble.
+        // The next round's startStreamingRound() will send notifyStart which
+        // the frontend's groupReducer handles by reusing the existing assistant
+        // group (still streaming). Intermediate tokens are discarded via round_end.
         sendMessageInternal(msgId)
     }
 
@@ -399,7 +390,6 @@ $selection
         activeStream?.cancel()
         activeStream = null
         activeMessageId = null
-        bridgeNotifiedStart.remove(msgId)
         resetToolCallState()
         publishStatus()
         bridgeHandler?.notifyStructuredError(BridgeErrorPayload(
@@ -409,6 +399,10 @@ $selection
     }
 
     private fun startStreamingRound(msgId: String, request: okhttp3.Request, toolsEnabled: Boolean) {
+        // Phase 2: notifyStart sent unconditionally — the frontend's groupReducer
+        // handles continuation rounds by reusing the existing assistant group.
+        bridgeHandler?.notifyStart(msgId)
+
         val responseBuffer = StringBuilder()
         scope.launch {
             val stream = client.streamChat(
@@ -416,27 +410,11 @@ $selection
                 onToken = { token ->
                     if (activeMessageId == msgId) {
                         responseBuffer.append(token)
-                        // Lazily create the assistant bubble on first token.
-                        // If this round ends up producing tool_calls, onFinishReason will
-                        // remove the bubble so execution cards stay in front.
-                        if (msgId !in bridgeNotifiedStart) {
-                            bridgeHandler?.notifyStart(msgId)
-                            bridgeNotifiedStart.add(msgId)
-                        }
                         bridgeHandler?.notifyToken(token)
                     }
                 },
                 onEnd = {
                     if (activeMessageId == msgId && !truncationHandler.isPendingContinuation) {
-                        // If the bubble hasn't been started yet (no tool calls in this round),
-                        // start it now and flush the buffered content.
-                        if (msgId !in bridgeNotifiedStart) {
-                            bridgeHandler?.notifyStart(msgId)
-                            bridgeNotifiedStart.add(msgId)
-                            if (responseBuffer.isNotEmpty()) {
-                                bridgeHandler?.notifyToken(responseBuffer.toString())
-                            }
-                        }
                         logger.info("[CodePlanGUI Approval] model round completed msgId=$msgId")
                         session.add(Message(
                             role = MessageRole.ASSISTANT,
@@ -447,7 +425,6 @@ $selection
                         persistSession()
                         activeStream = null
                         activeMessageId = null
-                        bridgeNotifiedStart.remove(msgId)
                         publishStatus()
                         bridgeHandler?.notifyEnd(msgId)
                     }
@@ -457,7 +434,6 @@ $selection
                         logger.warn("[CodePlanGUI Approval] model round failed msgId=$msgId error=$message")
                         activeStream = null
                         activeMessageId = null
-                        bridgeNotifiedStart.remove(msgId)
                         publishStatus()
                         bridgeHandler?.notifyStructuredError(classifyStreamError(message))
                     }
@@ -469,14 +445,9 @@ $selection
                 },
                 onFinishReason = { reason ->
                     if (toolsEnabled && reason == "tool_calls" && activeMessageId == msgId) {
-                        // Remove the assistant bubble if it was already created by the
-                        // lazy init in onToken.  This guarantees that execution cards
-                        // (pushed during handleToolCallComplete) always appear before
-                        // the final assistant bubble.
-                        if (msgId in bridgeNotifiedStart) {
-                            bridgeHandler?.notifyRemoveMessage(msgId)
-                            bridgeNotifiedStart.remove(msgId)
-                        }
+                        // Phase 2: tell the frontend to discard intermediate tokens from
+                        // this round, keeping only execution cards.
+                        bridgeHandler?.notifyRoundEnd(msgId)
                         val capturedBuffer = responseBuffer
                         scope.launch { handleToolCallComplete(msgId, capturedBuffer) }
                     }
@@ -725,7 +696,6 @@ $selection
         pendingApprovals.values.forEach { it.complete(false) }
         pendingApprovals.clear()
         pendingApprovalCommands.clear()
-        bridgeNotifiedStart.clear()
         scope.cancel()
     }
 

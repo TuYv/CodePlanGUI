@@ -71,6 +71,24 @@ class CommandExecutionServiceTest {
         assertInstanceOf(ExecutionResult.Blocked::class.java, result)
     }
 
+    @Test
+    fun `executeAsyncWithStream invokes onOutput once per line for rapid multi-line output`() = runBlocking {
+        val service = serviceWithTempProject()
+        val lines = mutableListOf<Pair<String, Boolean>>()
+        // Generate 50 lines of rapid output
+        val command = "for i in $(seq 1 50); do echo \"line \$i\"; done"
+        val result = service.executeAsyncWithStream(command, 10) { line, isError ->
+            lines += Pair(line, isError)
+        }
+        assertInstanceOf(ExecutionResult.Success::class.java, result)
+        val stdoutLines = lines.filter { !it.second }
+        assertEquals(50, stdoutLines.size, "Should receive exactly 50 stdout lines, one per output line")
+        // Verify each line was delivered individually (not batched)
+        for (i in 1..50) {
+            assertTrue(stdoutLines.any { it.first == "line $i" }, "Should contain 'line $i'")
+        }
+    }
+
     private fun serviceWithTempProject(): CommandExecutionService {
         val tempDir = Files.createTempDirectory("ces-test").toFile()
         tempDir.deleteOnExit()

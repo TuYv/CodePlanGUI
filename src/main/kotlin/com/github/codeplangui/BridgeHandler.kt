@@ -1,16 +1,21 @@
 package com.github.codeplangui
 
-import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.jcef.JBCefBrowserBase
 import com.intellij.ui.jcef.JBCefJSQuery
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.cef.browser.CefBrowser
 import org.cef.browser.CefFrame
 import org.cef.handler.CefLoadHandlerAdapter
+import java.util.Queue
+import java.util.Timer
+import java.util.TimerTask
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
 
 @Serializable
 private data class BridgePayload(
@@ -106,6 +111,11 @@ class BridgeHandler(
     var isReady: Boolean = false
         private set
 
+    private val pendingJs: Queue<String> = ConcurrentLinkedQueue()
+    private val flushPending = AtomicBoolean(false)
+    private val flushTimer = Timer("bridge-flush", true)
+    private val flushLock = Any()
+
     fun register() {
         sendQuery = JBCefJSQuery.create(browser as JBCefBrowserBase)
         sendQuery.addHandler { payload ->
@@ -156,7 +166,6 @@ class BridgeHandler(
             override fun onLoadEnd(browser: CefBrowser, frame: CefFrame, httpStatusCode: Int) {
                 if (frame.isMain) {
                     isReady = true
-                    logger.warn("[CodePlanGUI Bridge] onLoadEnd fired, isReady=true, setting up window.__bridge")
                     chatService.attachBridge(this@BridgeHandler)
                     val js = """
                         window.__bridge = {
@@ -195,7 +204,8 @@ class BridgeHandler(
                             onExecutionStatus: function(requestId, status, result) {},
                             onRestoreMessages: function(messages) {},
                             onStructuredError: function(error) {},
-                            onContinuation: function(current, max) {}
+                            onContinuation: function(current, max) {},
+                            onRemoveMessage: function(msgId) {}
                         };
                         document.dispatchEvent(new Event('bridge_ready'));
                     """.trimIndent()
@@ -224,22 +234,22 @@ class BridgeHandler(
         }, browser.cefBrowser)
     }
 
-    fun notifyStart(msgId: String) = pushJS("window.__bridge.onStart(${msgId.quoted()})")
+    fun notifyStart(msgId: String) = flushAndPush("window.__bridge.onStart(${msgId.quoted()})")
 
-    fun notifyToken(token: String) = pushJS("window.__bridge.onToken(${token.quoted()})")
+    fun notifyToken(token: String) = enqueueJS("window.__bridge.onToken(${token.quoted()})")
 
-    fun notifyEnd(msgId: String) = pushJS("window.__bridge.onEnd(${msgId.quoted()})")
+    fun notifyEnd(msgId: String) = flushAndPush("window.__bridge.onEnd(${msgId.quoted()})")
 
     fun notifyError(errorType: String, message: String) {
         logger.warn("[CodePlanGUI Bridge] notifyError: type=$errorType, message=${message.take(80)}")
-        pushJS("window.__bridge.onError(${errorType.quoted()}, ${message.quoted()})")
+        flushAndPush("window.__bridge.onError(${errorType.quoted()}, ${message.quoted()})")
     }
 
     fun notifyStructuredError(error: BridgeErrorPayload) =
-        pushJS("window.__bridge.onStructuredError(${json.encodeToString(error)})")
+        flushAndPush("window.__bridge.onStructuredError(${json.encodeToString(error)})")
 
     fun notifyStatus(status: BridgeStatusPayload) =
-        pushJS("window.__bridge.onStatus(${json.encodeToString(status)})")
+        flushAndPush("window.__bridge.onStatus(${json.encodeToString(status)})")
 
     fun notifyContextFile(fileName: String) =
         pushJS("window.__bridge.onContextFile(${fileName.quoted()})")
@@ -248,7 +258,7 @@ class BridgeHandler(
         pushJS("window.__bridge.onTheme(${theme.quoted()})")
 
     fun notifyLog(msgId: String, logLine: String, type: String) =
-        pushJS(
+        enqueueJS(
             "window.__bridge.onLog(" +
             "${json.encodeToString(msgId)}," +
             "${json.encodeToString(logLine)}," +
@@ -256,7 +266,7 @@ class BridgeHandler(
         )
 
     fun notifyExecutionCard(requestId: String, command: String, description: String) =
-        pushJS(
+        flushAndPush(
             "window.__bridge.onExecutionCard(" +
             "${json.encodeToString(requestId)}," +
             "${json.encodeToString(command)}," +
@@ -264,7 +274,7 @@ class BridgeHandler(
         )
 
     fun notifyApprovalRequest(requestId: String, command: String, description: String) =
-        pushJS(
+        flushAndPush(
             "window.__bridge.onApprovalRequest(" +
             "${json.encodeToString(requestId)}," +
             "${json.encodeToString(command)}," +
@@ -277,7 +287,7 @@ class BridgeHandler(
         }
 
     fun notifyExecutionStatus(requestId: String, status: String, resultJson: String) =
-        pushJS(
+        flushAndPush(
             "window.__bridge.onExecutionStatus(" +
             "${json.encodeToString(requestId)}," +
             "${json.encodeToString(status)}," +
@@ -290,19 +300,106 @@ class BridgeHandler(
         }
 
     fun notifyRestoreMessages(messages: String) =
-        pushJS("window.__bridge.onRestoreMessages($messages)")
+        flushAndPush("window.__bridge.onRestoreMessages(${json.encodeToString(messages)})")
 
     fun notifyContinuation(current: Int, max: Int) =
         pushJS("window.__bridge.onContinuation($current, $max)")
+
+    fun notifyRemoveMessage(msgId: String) =
+        flushAndPush("window.__bridge.onRemoveMessage(${msgId.quoted()})")
+
+    /**
+     * Enqueue a streamable JS call (token / log line) for batch delivery.
+     * A daemon timer flushes the queue every ~16 ms, bypassing the EDT entirely.
+     */
+    private fun enqueueJS(js: String) {
+        if (!isReady) {
+            logger.debug("[CodePlanGUI Bridge] enqueueJS discarded (bridge not ready): ${js.take(120)}")
+            return
+        }
+        pendingJs.add(js)
+        scheduleFlush()
+    }
+
+    /**
+     * Flush any buffered streamable calls, then push a non-streamable call immediately.
+     * Used for structural events (start, end, error, etc.) where ordering matters.
+     */
+    private fun flushAndPush(js: String) {
+        if (!isReady) {
+            logger.debug("[CodePlanGUI Bridge] flushAndPush discarded (bridge not ready): ${js.take(120)}")
+            return
+        }
+        flushPendingBuffer()
+        executeJS(js)
+    }
+
+    /**
+     * Schedule a timer-based flush that bypasses the EDT.
+     * The [flushPending] flag ensures at most one timer task is outstanding.
+     */
+    private fun scheduleFlush() {
+        if (flushPending.compareAndSet(false, true)) {
+            flushTimer.schedule(object : TimerTask() {
+                override fun run() {
+                    flushPendingBuffer()
+                    flushPending.set(false)
+                    if (pendingJs.isNotEmpty()) {
+                        scheduleFlush()
+                    }
+                }
+            }, FLUSH_INTERVAL_MS)
+        }
+    }
+
+    /**
+     * Drain the pending queue and execute as a single batched JS call.
+     * Called from the flush timer thread or from [flushAndPush].
+     */
+    internal fun flushPendingBuffer() {
+        synchronized(flushLock) {
+            val batch = mutableListOf<String>()
+            while (true) {
+                val item = pendingJs.poll() ?: break
+                batch.add(item)
+            }
+            if (batch.isNotEmpty()) {
+                executeJS(batch.joinToString(";"))
+            }
+        }
+    }
 
     private fun pushJS(js: String) {
         if (!isReady) {
             logger.debug("[CodePlanGUI Bridge] pushJS discarded (bridge not ready): ${js.take(120)}")
             return
         }
-        ApplicationManager.getApplication().invokeLater {
+        executeJS(js)
+    }
+
+    /**
+     * Execute a JavaScript string in the browser. Called directly without EDT dispatch —
+     * CEF's [executeJavaScript] is thread-safe and posts the JS to the renderer process.
+     */
+    private fun executeJS(js: String) {
+        try {
             browser.cefBrowser.executeJavaScript(js, "", 0)
+        } catch (e: Exception) {
+            logger.debug("[CodePlanGUI Bridge] executeJS failed: ${e.message}")
         }
+    }
+
+    /**
+     * Cancel the flush timer and drain any remaining pending JS calls.
+     */
+    fun dispose() {
+        flushTimer.cancel()
+        flushPendingBuffer()
+    }
+
+    companion object {
+        /** Flush interval in ms — ~60 fps. */
+        internal const val FLUSH_INTERVAL_MS = 16L
     }
 
     private fun String.quoted() = "'${replace("'", "\\'")}'"

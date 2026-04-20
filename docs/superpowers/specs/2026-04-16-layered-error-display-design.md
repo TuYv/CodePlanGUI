@@ -6,12 +6,12 @@
 
 ## 错误分类
 
-| 类型 | 判断依据 | 标签 | 配色 | 按钮 |
+| 类型 | 判断依据 | 标签 | 图标 | 按钮 |
 |------|----------|------|------|------|
-| `auth` 配置错误 | HTTP 401/403 | 🔐 配置错误 | 红色 #c0392b | 打开设置 |
-| `quota` 配额错误 | QUOTA 语义关键词 | 💰 配额不足 | 橙色 #d4a017 | 打开设置 |
-| `temp` 临时错误 | HTTP 429/503/529 + BUSY 语义 | ⏳ 临时错误 | 蓝色 #2980b9 | 重试 |
-| `generic` 未知错误 | 其他所有情况 | ❓ 未知错误 | 灰色 #7f8c8d | 无 |
+| `auth` 配置错误 | HTTP 401/403 | 配置错误 | 🔐 | 打开设置 |
+| `quota` 配额错误 | QUOTA 语义关键词 | 配额不足 | 💰 | 打开设置 |
+| `temp` 临时错误 | HTTP 429/503/529 + BUSY 语义 | 临时错误 | ⏳ | 重试 |
+| `generic` 未知错误 | 其他所有情况 | 未知错误 | ❓ | 无 |
 
 ## 架构变更
 
@@ -28,19 +28,21 @@ fun notifyError(errorType: String, message: String) =
     pushJS("window.__bridge.onError(${json.encodeToString(errorType)}, ${json.encodeToString(message)})")
 ```
 
-**2. `BridgeStatusPayload` 增加字段**
+同时新增 `notifyStructuredError` 支持结构化错误：
 
 ```kotlin
 @Serializable
-data class BridgeStatusPayload(
-    val providerName: String = "",
-    val model: String = "",
-    val connectionState: String = "unconfigured",
-    val lastErrorType: String? = null  // 新增
+data class BridgeErrorPayload(
+    val type: String,
+    val message: String,
+    val action: String? = null
 )
+
+fun notifyStructuredError(error: BridgeErrorPayload) =
+    pushJS("window.__bridge.onStructuredError(${json.encodeToString(error)})")
 ```
 
-**3. `ChatService.kt` — `abortStream` 传递错误类型**
+**2. `ChatService.kt` — `abortStream` 传递错误类型**
 
 `abortStream` 调用 `bridgeHandler?.notifyError(errorType, message)`，由调用处传入错误类型。
 
@@ -49,28 +51,22 @@ data class BridgeStatusPayload(
 - `startStreamingRound` 中 `onError` 回调 → 从 SSE 错误解析得到类型
 - `prepareToolCallsForExecution` 中的 abort → `"generic"`
 
-**4. `OkHttpSseClient.kt` — 已有分类逻辑，暴露接口**
-
-`ErrorType` enum 和 `classifyError` 已是 private，需提升可见性或新增 public 方法：
-
-```kotlin
-fun classifyErrorType(msg: String): String {
-    return when (classifyError(msg)) {
-        ErrorType.AUTH -> "auth"
-        ErrorType.QUOTA -> "quota"
-        ErrorType.RETRIABLE_BUSY -> "temp"
-        ErrorType.GENERIC -> "generic"
-    }
-}
-```
-
-`buildErrorMessage` 返回值需同步带上类型信息，建议封装为 data class：
+**3. `OkHttpSseClient.kt` — 新增 ClassifiedError 和 classifyErrorType**
 
 ```kotlin
 data class ClassifiedError(
     val type: String,  // "auth" | "quota" | "temp" | "generic"
     val message: String
 )
+
+fun classifyErrorType(rawMessage: String): String {
+    return when {
+        QUOTA_PATTERNS.any { it in rawMessage.lowercase() } -> "quota"
+        AUTH_PATTERNS.any { it in rawMessage.lowercase() } -> "auth"
+        BUSY_PATTERNS.any { it in rawMessage.lowercase() } -> "temp"
+        else -> "generic"
+    }
+}
 
 // streamChat 的 onError 回调改为 onError: (ClassifiedError) -> Unit
 ```
@@ -83,7 +79,14 @@ data class ClassifiedError(
 export interface Bridge {
   // ...
   onError: (type: string, message: string) => void  // 旧: onError: (message: string) => void
+  onStructuredError: (error: BridgeError) => void  // 新增
   // ...
+}
+
+export interface BridgeError {
+  type: string
+  message: string
+  action?: string
 }
 
 export interface BridgeStatus {
@@ -95,23 +98,36 @@ export interface BridgeStatus {
 **2. `ErrorBanner.tsx` — 按 type 渲染不同样式**
 
 ```typescript
-interface ErrorBannerProps {
-  errorType: string  // "auth" | "quota" | "temp" | "generic"
+interface Props {
+  errorType: 'auth' | 'quota' | 'temp' | 'generic'
   message: string
   onClose: () => void
   onAction?: () => void  // "打开设置" | "重试"
 }
 
-// 配色映射
-const ERROR_STYLES = {
-  auth:    { bg: "#2d1a1a", border: "#c0392b", icon: "🔐", label: "配置错误" },
-  quota:   { bg: "#2d2416", border: "#d4a017", icon: "💰", label: "配额不足" },
-  temp:    { bg: "#1a2a3a", border: "#2980b9", icon: "⏳", label: "临时错误" },
-  generic: { bg: "#2a2a2a", border: "#7f8c8d", icon: "❓", label: "未知错误" },
+const ERROR_CONFIG = {
+  auth: { label: '配置错误', icon: '🔐', actionLabel: '打开设置' },
+  quota: { label: '配额不足', icon: '💰', actionLabel: '打开设置' },
+  temp: { label: '临时错误', icon: '⏳', actionLabel: '重试' },
+  generic: { label: '未知错误', icon: '❓', actionLabel: null },
 }
 ```
 
-**3. `App.tsx` — 更新 onError 回调**
+**样式实现**：使用 CSS class 区分类型，配合 CSS 变量实现主题适配：
+
+```css
+.error-banner-auth {
+  background: rgba(210, 161, 94, 0.12);
+  border-color: rgba(210, 161, 94, 0.35);
+}
+.error-banner-quota {
+  background: rgba(212, 160, 23, 0.12);
+  border-color: rgba(212, 160, 23, 0.35);
+}
+/* ... */
+```
+
+**3. `App.tsx` — 更新 onError 回调和重试逻辑**
 
 ```typescript
 const onError = useCallback((type: string, message: string) => {
@@ -119,26 +135,33 @@ const onError = useCallback((type: string, message: string) => {
   setMessages(prev =>
     prev.map(item => item.isStreaming ? { ...item, isStreaming: false } : item)
   )
-  setError(type)  // 存 type，message 通过其他方式传递
+  setErrorType(type)
+  setErrorMessage(message)
 }, [])
 
-// ErrorBanner 接收 errorType
-{error && <ErrorBanner errorType={error} message={errorMessage} onClose={() => setError(null)} />}
+const onStructuredError = useCallback((bridgeError: BridgeError) => {
+  setIsLoading(false)
+  setErrorType(bridgeError.type)
+  setErrorMessage(bridgeError.message)
+}, [])
 
-// 需要新增 state: errorMessage: string | null
+const handleErrorAction = useCallback(() => {
+  const type = errorType
+  if (type === 'auth' || type === 'quota') {
+    window.__bridge?.openSettings()
+  } else if (type === 'temp' && lastUserMessageRef.current) {
+    // Retry: re-send last user message
+    const msgToRetry = lastUserMessageRef.current
+    window.__bridge?.sendMessage(msgToRetry.text, msgToRetry.includeContext)
+  }
+  setErrorType(null)
+  setErrorMessage(null)
+}, [errorType])
 ```
 
-**4. ProviderBar 内联状态（可选增强）**
+**4. `composerState.ts` — connectionState 为 'error' 时显示提示**
 
-当 `status.lastErrorType` 存在时，ProviderBar 右侧显示错误类型 tag：
-
-```typescript
-{status.lastErrorType && (
-  <span className={`error-tag error-tag-${status.lastErrorType}`}>
-    {ERROR_LABELS[status.lastErrorType]}
-  </span>
-)}
-```
+当 API Key 未设置时，`connectionState` 为 `'error'`，composer 区域显示"API Key 未设置或未保存，请在 Settings 中重新配置并应用"，点击发送按钮会触发 `errorType='auth'` 的 ErrorBanner，显示"打开设置"按钮。
 
 ## 数据流
 
@@ -156,13 +179,28 @@ App.tsx onError(type, message)
 ErrorBanner errorType={type} message={message}
 ```
 
+**结构化错误流**（SSE 流中分类错误）：
+
+```
+OkHttpSseClient 分类错误
+    ↓ BridgeErrorPayload(type, message, action)
+BridgeHandler.notifyStructuredError(error)
+    ↓ pushJS
+window.__bridge.onStructuredError(error)
+    ↓
+App.tsx onStructuredError(bridgeError)
+    ↓
+ErrorBanner（action 可触发 openSettings 或 retry）
+```
+
 ## 测试要点
 
-- HTTP 401/403 → 显示红色"配置错误"，点击"打开设置"跳转 Settings
-- 配额错误（insufficient_quota）→ 显示橙色"配额不足"，点击"打开设置"
-- HTTP 429/503/529 → 显示蓝色"临时错误"，点击"重试"重新发送上一条消息
-- 网络超时/ConnectException → 显示蓝色"临时错误"（属于 BUSY 类型）
-- 未知错误 → 显示灰色"未知错误"，无按钮
+- HTTP 401/403 → 显示"配置错误" 🔐，点击"打开设置"跳转 Settings
+- 配额错误（insufficient_quota）→ 显示"配额不足" 💰，点击"打开设置"
+- HTTP 429/503/529 → 显示"临时错误" ⏳，点击"重试"重新发送上一条消息
+- 网络超时/ConnectException → 显示"临时错误"（属于 BUSY 类型）
+- API Key 未设置时点击发送 → 显示"配置错误"，点击"打开设置"
+- 未知错误 → 显示"未知错误" ❓，无按钮
 
 ## 未纳入
 

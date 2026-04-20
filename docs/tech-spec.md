@@ -86,7 +86,7 @@ webview/src/
 ├── components/
 │   ├── MessageBubble.tsx       — 单条消息，含 Markdown 渲染
 │   ├── ProviderBar.tsx         — 顶栏：provider 名称 + 连接状态 + New Chat 按钮
-│   └── ErrorBanner.tsx         — 顶部错误横幅，8s 自动消失或手动关闭
+│   └── ErrorBanner.tsx         — 顶部错误横幅，按类型分层展示（配置错误/配额不足/临时错误/未知错误）
 ├── hooks/
 │   └── useBridge.ts            — 封装 window.__bridge，注册 token/error 回调
 └── types/
@@ -174,7 +174,8 @@ fun notifyError(message: String) = pushJS("window.__bridge.onError(${Json.encode
 window.__bridge.onStart = (msgId: string) => { /* 新建 AI 消息气泡 */ }
 window.__bridge.onToken = (token: string) => { /* 追加 token 到当前 AI 消息 */ }
 window.__bridge.onEnd = (msgId: string) => { /* 移除闪烁光标，解锁输入框 */ }
-window.__bridge.onError = (message: string) => { /* 显示 ErrorBanner */ }
+window.__bridge.onError = (type: string, message: string) => { /* 显示 ErrorBanner，按 type 渲染不同样式 */ }
+window.__bridge.onStructuredError = (error: BridgeError) => { /* 显示 ErrorBanner，支持 action 按钮 */ }
 ```
 
 **Prohibited:** 不得用轮询（setInterval）从 Kotlin 侧拉取 token。必须使用 `executeJavaScript` 主动推送。
@@ -752,14 +753,25 @@ cd webview && npm run dev
 
 | 触发点 | 用户看到 | 恢复路径 |
 |---|---|---|
-| 发送时未配置 Provider | ErrorBanner："请先配置 API Provider" + 设置链接 | 点链接打开 Settings |
-| API Key 错误（401） | ErrorBanner："HTTP 401: 认证失败，请检查 API Key" | 输入框解锁，可重发 |
-| 网络超时（readTimeout 60s） | ErrorBanner："请求超时，请检查网络或 endpoint" | 输入框解锁，可重发 |
-| endpoint 路径错误（404） | ErrorBanner："HTTP 404: endpoint 路径可能有误（应包含 /v1）" | 输入框解锁 |
+| 发送时未配置 Provider | ErrorBanner auth 类型："请先配置 API Provider" + 打开设置按钮 | 点按钮打开 Settings |
+| API Key 未设置或错误 | ErrorBanner auth 类型："API Key 未设置或未保存，请在 Settings 中重新配置" + 打开设置按钮 | 点按钮打开 Settings |
+| 网络超时（readTimeout 60s） | ErrorBanner temp 类型："请求超时，请检查网络或 endpoint" + 重试按钮 | 点按钮重发 |
+| endpoint 路径错误（404） | ErrorBanner auth 类型："HTTP 404: endpoint 路径可能有误（应包含 /v1）" | 输入框解锁，可重发 |
+| 配额不足 | ErrorBanner quota 类型："配额不足" + 打开设置按钮 | 点按钮打开 Settings |
+| 未知错误 | ErrorBanner generic 类型："未知错误" + 无按钮 | 输入框解锁，可重发 |
 | JBR 不支持 JCEF | 静态 JLabel 说明，不崩溃 | 用户切换 JBR |
 | git diff --staged 失败 | Messages.showError："无法读取 staged 改动，请确认在 git 仓库中" | 无需恢复 |
 | 未找到 Commit 对话框 | 消息写入剪贴板 + 通知"已复制" | 手动粘贴 |
 | JCEF 加载 HTML 失败 | ErrorBanner（初始化时）："前端加载失败，请重启 IDE" | 重启 |
+
+**ErrorBanner 分层类型：**
+
+| 类型 | 标签 | 按钮 |
+|---|---|---|
+| auth | 配置错误 | 打开设置 |
+| quota | 配额不足 | 打开设置 |
+| temp | 临时错误 | 重试 |
+| generic | 未知错误 | 无 |
 
 ---
 

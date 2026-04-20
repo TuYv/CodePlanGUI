@@ -1,6 +1,7 @@
 package com.github.codeplangui
 
 import com.github.codeplangui.api.OkHttpSseClient
+import com.github.codeplangui.api.ClassifiedError
 import com.github.codeplangui.api.ToolCallAccumulator
 import com.github.codeplangui.api.ToolCallDelta
 import com.github.codeplangui.api.ToolDefinition
@@ -117,22 +118,14 @@ class ChatService(private val project: Project) : Disposable {
         val provider = settings.getActiveProvider()
         if (provider == null) {
             publishStatus()
-            bridgeHandler?.notifyStructuredError(BridgeErrorPayload(
-                type = "config",
-                message = "请先在 Settings > Tools > CodePlanGUI 中配置 API Provider",
-                action = "openSettings"
-            ))
+            bridgeHandler?.notifyError("auth", "请先在 Settings > Tools > CodePlanGUI 中配置 API Provider")
             return
         }
 
         val apiKey = ApiKeyStore.load(provider.id) ?: ""
         if (apiKey.isBlank()) {
             publishStatus()
-            bridgeHandler?.notifyStructuredError(BridgeErrorPayload(
-                type = "config",
-                message = "API Key 未设置或未保存，请在 Settings 中重新配置并点 Apply/OK",
-                action = "openSettings"
-            ))
+            bridgeHandler?.notifyError("auth", "API Key 未设置或未保存，请在 Settings 中重新配置并点 Apply/OK")
             return
         }
 
@@ -393,19 +386,16 @@ $selection
     }
 
     /** Terminates an in-progress stream with an error and resets all state, preventing a permanent stuck spinner. */
-    private fun abortStream(msgId: String, errorMessage: String) {
+    private fun abortStream(msgId: String, errorType: String, errorMessage: String) {
         if (activeMessageId != msgId) return
-        logger.warn("[CodePlanGUI Approval] aborting stream msgId=$msgId error=${errorMessage.summarizeForLog(240)}")
+        logger.warn("[CodePlanGUI Approval] aborting stream msgId=$msgId type=$errorType error=${errorMessage.summarizeForLog(240)}")
         activeStream?.cancel()
         activeStream = null
         activeMessageId = null
         bridgeNotifiedStart.remove(msgId)
         resetToolCallState()
         publishStatus()
-        bridgeHandler?.notifyStructuredError(BridgeErrorPayload(
-            type = "runtime",
-            message = errorMessage
-        ))
+        bridgeHandler?.notifyError(errorType, errorMessage)
     }
 
     private fun startStreamingRound(msgId: String, request: okhttp3.Request, toolsEnabled: Boolean) {
@@ -452,14 +442,14 @@ $selection
                         bridgeHandler?.notifyEnd(msgId)
                     }
                 },
-                onError = { message ->
+                onError = { classifiedError ->
                     if (activeMessageId == msgId) {
-                        logger.warn("[CodePlanGUI Approval] model round failed msgId=$msgId error=$message")
+                        logger.warn("[CodePlanGUI Approval] model round failed msgId=$msgId type=${classifiedError.type} error=${classifiedError.message}")
                         activeStream = null
                         activeMessageId = null
                         bridgeNotifiedStart.remove(msgId)
                         publishStatus()
-                        bridgeHandler?.notifyStructuredError(classifyStreamError(message))
+                        bridgeHandler?.notifyError(classifiedError.type, classifiedError.message)
                     }
                 },
                 onToolCallChunk = { delta ->
@@ -555,7 +545,7 @@ $selection
     private fun prepareToolCallsForExecution(msgId: String): List<PreparedToolCall>? {
         val accumulatedToolCalls = toolCallAccumulator.snapshot()
         if (accumulatedToolCalls.isEmpty()) {
-            abortStream(msgId, "AI sent a tool_calls finish_reason but no tool call deltas were captured")
+            abortStream(msgId, "generic", "AI sent a tool_calls finish_reason but no tool call deltas were captured")
             return null
         }
 
@@ -563,6 +553,7 @@ $selection
             val toolCallId = accumulated.id ?: run {
                 abortStream(
                     msgId,
+                    "generic",
                     "AI sent a tool_calls finish_reason but tool call index ${accumulated.index} had no id"
                 )
                 return null
@@ -571,11 +562,11 @@ $selection
             val argsObj = try {
                 kotlinx.serialization.json.Json.parseToJsonElement(argsJson).jsonObject
             } catch (_: Exception) {
-                abortStream(msgId, "AI returned malformed tool call arguments for index ${accumulated.index}: '$argsJson'")
+                abortStream(msgId, "generic", "AI returned malformed tool call arguments for index ${accumulated.index}: '$argsJson'")
                 return null
             }
             val command = argsObj["command"]?.jsonPrimitive?.contentOrNull ?: run {
-                abortStream(msgId, "AI tool call index ${accumulated.index} is missing required 'command' field")
+                abortStream(msgId, "generic", "AI tool call index ${accumulated.index} is missing required 'command' field")
                 return null
             }
             val description = argsObj["description"]?.jsonPrimitive?.contentOrNull ?: ""

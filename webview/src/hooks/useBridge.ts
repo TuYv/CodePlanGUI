@@ -5,7 +5,7 @@ interface BridgeCallbacks {
   onStart: (msgId: string) => void
   onToken: (token: string) => void
   onEnd: (msgId: string) => void
-  onError: (message: string) => void
+  onError: (type: string, message: string) => void
   onStructuredError: (error: BridgeError) => void
   onStatus: (status: BridgeStatus) => void
   onContextFile: (fileName: string) => void
@@ -49,8 +49,10 @@ export function useBridge(callbacks: BridgeCallbacks) {
 
   useEffect(() => {
     const setup = () => {
+      console.log('[CodePlanGUI Bridge] setup called, window.__bridge exists:', !!window.__bridge)
       const currentCallbacks = callbacksRef.current
       if (!window.__bridge) {
+        console.log('[CodePlanGUI Bridge] Creating dummy bridge')
         window.__bridge = {
           isReady: false,
           sendMessage: () => {},
@@ -77,6 +79,7 @@ export function useBridge(callbacks: BridgeCallbacks) {
           onRemoveMessage: currentCallbacks.onRemoveMessage,
         }
       } else {
+        console.log('[CodePlanGUI Bridge] Overwriting existing bridge callbacks')
         window.__bridge.onStart = currentCallbacks.onStart
         window.__bridge.onToken = currentCallbacks.onToken
         window.__bridge.onEnd = currentCallbacks.onEnd

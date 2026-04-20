@@ -5,6 +5,7 @@ import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.jcef.JBCefBrowserBase
 import com.intellij.ui.jcef.JBCefJSQuery
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.cef.browser.CefBrowser
@@ -155,7 +156,7 @@ class BridgeHandler(
                 }
                 is BridgePayloadHandlingResult.CommandError -> {
                     logger.warn(result.message, result.cause)
-                    notifyError(result.message)
+                    notifyError("generic", result.message)
                     null
                 }
             }
@@ -235,11 +236,14 @@ class BridgeHandler(
 
     fun notifyStart(msgId: String) = flushAndPush("window.__bridge.onStart(${msgId.quoted()})")
 
-    fun notifyToken(token: String) = enqueueJS("window.__bridge.onToken(${json.encodeToString(token)})")
+    fun notifyToken(token: String) = enqueueJS("window.__bridge.onToken(${token.quoted()})")
 
     fun notifyEnd(msgId: String) = flushAndPush("window.__bridge.onEnd(${msgId.quoted()})")
 
-    fun notifyError(message: String) = flushAndPush("window.__bridge.onError(${json.encodeToString(message)})")
+    fun notifyError(errorType: String, message: String) {
+        logger.warn("[CodePlanGUI Bridge] notifyError: type=$errorType, message=${message.take(80)}")
+        flushAndPush("window.__bridge.onError(${errorType.quoted()}, ${message.quoted()})")
+    }
 
     fun notifyStructuredError(error: BridgeErrorPayload) =
         flushAndPush("window.__bridge.onStructuredError(${json.encodeToString(error)})")
@@ -248,10 +252,10 @@ class BridgeHandler(
         flushAndPush("window.__bridge.onStatus(${json.encodeToString(status)})")
 
     fun notifyContextFile(fileName: String) =
-        pushJS("window.__bridge.onContextFile(${json.encodeToString(fileName)})")
+        pushJS("window.__bridge.onContextFile(${fileName.quoted()})")
 
     fun notifyTheme(theme: String) =
-        pushJS("window.__bridge.onTheme(${json.encodeToString(theme)})")
+        pushJS("window.__bridge.onTheme(${theme.quoted()})")
 
     fun notifyLog(msgId: String, logLine: String, type: String) =
         enqueueJS(

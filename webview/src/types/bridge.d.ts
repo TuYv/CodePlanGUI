@@ -3,6 +3,7 @@ export interface BridgeStatus {
   model: string
   connectionState: 'unconfigured' | 'ready' | 'streaming' | 'error'
   contextFile?: string
+  lastErrorType?: string
 }
 
 export interface ExecutionResult {
@@ -33,7 +34,7 @@ export interface Bridge {
   onStart: (msgId: string) => void
   onToken: (token: string) => void
   onEnd: (msgId: string) => void
-  onError: (message: string) => void
+  onError: (type: string, message: string) => void
   onStructuredError: (error: BridgeError) => void
   onStatus: (status: BridgeStatus) => void
   onContextFile: (fileName: string) => void

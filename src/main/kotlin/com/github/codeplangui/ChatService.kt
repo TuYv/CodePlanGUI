@@ -733,6 +733,12 @@ $selection
             lowerMsg.contains("api key") || lowerMsg.contains("unauthorized") ->
                 BridgeErrorPayload(type = "config", message = message, action = "openSettings")
 
+            lowerMsg.contains("insufficient_quota") || lowerMsg.contains("quota") ||
+            lowerMsg.contains("billing") || lowerMsg.contains("credit") ||
+            lowerMsg.contains("payment") || lowerMsg.contains("余额不足") ||
+            lowerMsg.contains("超出限额") || lowerMsg.contains("额度不足") || lowerMsg.contains("欠费") ->
+                BridgeErrorPayload(type = "quota", message = message, action = "openSettings")
+
             lowerMsg.contains("timeout") || lowerMsg.contains("超时") ||
             lowerMsg.contains("无法连接") || lowerMsg.contains("connectexception") ||
             lowerMsg.contains("http 5") || lowerMsg.contains("http 429") ->

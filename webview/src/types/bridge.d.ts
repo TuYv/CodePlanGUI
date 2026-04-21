@@ -17,7 +17,7 @@ export interface ExecutionResult {
 }
 
 export interface BridgeError {
-  type: 'config' | 'network' | 'runtime'
+  type: 'config' | 'quota' | 'network' | 'runtime'
   message: string
   action?: 'openSettings' | 'retry'
 }

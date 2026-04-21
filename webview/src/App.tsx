@@ -40,6 +40,7 @@ export default function App() {
   const isComposingRef = useRef(false)
   const [includeContext, setIncludeContext] = useState(true)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const lastUserMessageRef = useRef<{ text: string; includeContext: boolean } | null>(null)
 
   const { groups, isLoading, error, status, themeMode, approvalOpen, approvalRequestId, approvalCommand, approvalDescription, continuationInfo } = appState
 
@@ -109,7 +110,13 @@ export default function App() {
   const handleSend = () => {
     if (!composerReadiness.canSend) {
       if (composerReadiness.reason && composerReadiness.text) {
-        setAppState(prev => ({ ...prev, error: { type: 'runtime' as const, message: composerReadiness.reason! } }))
+        const errorType = (status.connectionState === 'unconfigured' || status.connectionState === 'error')
+          ? 'config' as const
+          : 'runtime' as const
+        const action = (status.connectionState === 'unconfigured' || status.connectionState === 'error')
+          ? 'openSettings' as 'openSettings' | undefined
+          : undefined
+        setAppState(prev => ({ ...prev, error: { type: errorType, message: composerReadiness.reason!, action } }))
       }
       return
     }
@@ -118,6 +125,7 @@ export default function App() {
     if (!payload) return
 
     const userMsgId = uuidv4()
+    lastUserMessageRef.current = { text: payload.text, includeContext }
     setAppState(prev => ({
       ...prev,
       groups: [...prev.groups, { type: 'human' as const, id: userMsgId, message: { id: userMsgId, content: payload.text } }],
@@ -148,6 +156,22 @@ export default function App() {
     if (!isLoading) return
     window.__bridge?.cancelStream()
   }, [isLoading])
+
+  const handleErrorAction = useCallback((action: 'openSettings' | 'retry') => {
+    if (action === 'openSettings') {
+      window.__bridge?.openSettings()
+      setAppState(prev => ({ ...prev, error: null }))
+    } else if (action === 'retry' && lastUserMessageRef.current) {
+      const msg = lastUserMessageRef.current
+      const userMsgId = uuidv4()
+      setAppState(prev => ({
+        ...prev,
+        groups: [...prev.groups, { type: 'human' as const, id: userMsgId, message: { id: userMsgId, content: msg.text } }],
+        error: null,
+      }))
+      window.__bridge?.sendMessage(msg.text, msg.includeContext)
+    }
+  }, [])
 
   // ESC key to cancel streaming
   useEffect(() => {
@@ -194,7 +218,7 @@ export default function App() {
           bridgeReady={bridgeReady}
         />
 
-        {error && <ErrorBanner error={error} onClose={() => setAppState(prev => ({ ...prev, error: null }))} />}
+        {error && <ErrorBanner error={error} onClose={() => setAppState(prev => ({ ...prev, error: null }))} onAction={handleErrorAction} />}
 
         <div className="messages-area">
           {groups.length === 0 && (

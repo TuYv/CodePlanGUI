@@ -1,0 +1,161 @@
+.error-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 16px 0;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid;
+  backdrop-filter: blur(12px);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.error-banner-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+}
+
+.error-banner-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.error-banner-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.error-banner-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  opacity: 0.85;
+}
+
+.error-banner-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  margin-left: auto;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0.5;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.error-banner-close:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.error-banner-message {
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  opacity: 0.9;
+}
+
+/* ---- Config: warm amber ---- */
+.error-banner-config {
+  background: rgba(210, 161, 94, 0.1);
+  border-color: rgba(210, 161, 94, 0.3);
+}
+.error-banner-config .error-banner-icon {
+  background: rgba(210, 161, 94, 0.18);
+  color: #d2a15e;
+}
+.error-banner-config .error-banner-label {
+  color: #d2a15e;
+}
+
+/* ---- Quota: gold ---- */
+.error-banner-quota {
+  background: rgba(212, 160, 23, 0.1);
+  border-color: rgba(212, 160, 23, 0.3);
+}
+.error-banner-quota .error-banner-icon {
+  background: rgba(212, 160, 23, 0.18);
+  color: #d4a017;
+}
+.error-banner-quota .error-banner-label {
+  color: #d4a017;
+}
+
+/* ---- Network: blue ---- */
+.error-banner-network {
+  background: rgba(74, 144, 217, 0.1);
+  border-color: rgba(74, 144, 217, 0.3);
+}
+.error-banner-network .error-banner-icon {
+  background: rgba(74, 144, 217, 0.18);
+  color: #4a90d9;
+}
+.error-banner-network .error-banner-label {
+  color: #4a90d9;
+}
+
+/* ---- Runtime: muted red ---- */
+.error-banner-runtime {
+  background: rgba(91, 24, 20, 0.45);
+  border-color: rgba(255, 138, 117, 0.25);
+}
+.error-banner-runtime .error-banner-icon {
+  background: rgba(255, 138, 117, 0.15);
+  color: #ff8a75;
+}
+.error-banner-runtime .error-banner-label {
+  color: #ff8a75;
+}
+
+/* ---- Action Buttons ---- */
+.error-banner-btn-settings,
+.error-banner-btn-retry {
+  flex-shrink: 0;
+  height: 28px !important;
+  padding: 0 12px !important;
+  border-radius: 10px !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  border: 1px solid !important;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.error-banner-btn-settings {
+  background: linear-gradient(135deg, rgba(185, 131, 70, 0.9), rgba(135, 85, 43, 0.9)) !important;
+  border-color: rgba(240, 196, 136, 0.4) !important;
+  color: #f2eadf !important;
+  box-shadow: 0 4px 12px rgba(89, 47, 17, 0.25);
+}
+
+.error-banner-btn-settings:hover {
+  background: linear-gradient(135deg, rgba(200, 145, 78, 0.95), rgba(150, 95, 48, 0.95)) !important;
+  border-color: rgba(240, 196, 136, 0.55) !important;
+  box-shadow: 0 6px 16px rgba(89, 47, 17, 0.3);
+  transform: translateY(-1px);
+}
+
+.error-banner-btn-retry {
+  background: rgba(74, 144, 217, 0.12) !important;
+  border-color: rgba(74, 144, 217, 0.35) !important;
+  color: #4a90d9 !important;
+}
+
+.error-banner-btn-retry:hover {
+  background: rgba(74, 144, 217, 0.22) !important;
+  border-color: rgba(74, 144, 217, 0.5) !important;
+  transform: translateY(-1px);
+}

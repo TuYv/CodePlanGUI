@@ -15,6 +15,7 @@
     "src/contextState.ts",
     "src/executionStatus.ts",
     "src/components/ExecutionCard.tsx",
-    "src/eventReducer.ts"
+    "src/eventReducer.ts",
+    "src/groupReducer.ts"
   ]
 }

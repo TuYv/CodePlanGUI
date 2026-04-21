@@ -2,21 +2,21 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { BorderOutlined, SendOutlined } from '@ant-design/icons'
 import { Button, ConfigProvider, Switch, Tooltip, Typography, theme as antdTheme } from 'antd'
 import { v4 as uuidv4 } from 'uuid'
+import { AssistantGroup } from './components/AssistantGroup'
 import { ApprovalDialog } from './components/ApprovalDialog'
 import { ErrorBanner } from './components/ErrorBanner'
-import { MessageBubble } from './components/MessageBubble'
 import { ProviderBar } from './components/ProviderBar'
 import { getComposerReadiness } from './composerState'
 import { getContextToggleMeta } from './contextState'
 import { stringifyExecutionResultPayload } from './executionStatus'
-import { AppState, eventReducer } from './eventReducer'
+import { GroupState, groupReducer } from './groupReducer'
 import { useBridge } from './hooks/useBridge'
 import { prepareSendPayload } from './sendState'
 import { BridgeStatus } from './types/bridge'
 import './App.css'
 
-const initialAppState: AppState = {
-  messages: [],
+const initialAppState: GroupState = {
+  groups: [],
   isLoading: false,
   error: null,
   status: {
@@ -31,16 +31,17 @@ const initialAppState: AppState = {
   approvalCommand: '',
   approvalDescription: '',
   continuationInfo: null,
+  currentRoundTextIndex: null,
 }
 
 export default function App() {
-  const [appState, setAppState] = useState<AppState>(initialAppState)
+  const [appState, setAppState] = useState<GroupState>(initialAppState)
   const [inputText, setInputText] = useState('')
   const isComposingRef = useRef(false)
   const [includeContext, setIncludeContext] = useState(true)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  const { messages, isLoading, error, status, themeMode, approvalOpen, approvalRequestId, approvalCommand, approvalDescription, continuationInfo } = appState
+  const { groups, isLoading, error, status, themeMode, approvalOpen, approvalRequestId, approvalCommand, approvalDescription, continuationInfo } = appState
 
   // Apply theme class to document root
   useEffect(() => {
@@ -54,7 +55,7 @@ export default function App() {
 
   useEffect(() => {
     scrollToBottom()
-  }, [messages])
+  }, [groups])
 
   const emitFrontendDebugLog = useCallback((message: string) => {
     window.__bridge?.debugLog(message)
@@ -70,7 +71,7 @@ export default function App() {
       emitFrontendDebugLog(`[approval-ui] received execution status requestId=${payload.requestId} status=${payload.status} result=${rawResult.slice(0, 240)}`)
     }
 
-    setAppState(prev => eventReducer(prev, type, payload))
+    setAppState(prev => groupReducer(prev, type, payload))
   }, [emitFrontendDebugLog])
 
   const handleApprovalAllow = useCallback((addToWhitelist: boolean) => {
@@ -119,7 +120,7 @@ export default function App() {
     const userMsgId = uuidv4()
     setAppState(prev => ({
       ...prev,
-      messages: [...prev.messages, { id: userMsgId, role: 'user' as const, content: payload.text }],
+      groups: [...prev.groups, { type: 'human' as const, id: userMsgId, message: { id: userMsgId, content: payload.text } }],
     }))
     setInputText('')
     window.__bridge?.sendMessage(payload.text, includeContext)
@@ -135,9 +136,10 @@ export default function App() {
   const handleNewChat = () => {
     setAppState(prev => ({
       ...prev,
-      messages: [],
+      groups: [],
       error: null,
       isLoading: false,
+      currentRoundTextIndex: null,
     }))
     window.__bridge?.newChat()
   }
@@ -195,7 +197,7 @@ export default function App() {
         {error && <ErrorBanner error={error} onClose={() => setAppState(prev => ({ ...prev, error: null }))} />}
 
         <div className="messages-area">
-          {messages.length === 0 && (
+          {groups.length === 0 && (
             <div className="empty-state">
               <div className="empty-card">
                 <div className="empty-icon">✦</div>
@@ -216,20 +218,25 @@ export default function App() {
             </div>
           )}
 
-          {messages.map((message) => (
-            <MessageBubble key={message.id} message={message} />
-          ))}
+          {groups.map(group => {
+            if (group.type === 'human') {
+              return (
+                <div key={group.id} className="message-row message-row-user">
+                  <div className="message-bubble message-bubble-user">
+                    <Typography.Text>{group.message.content}</Typography.Text>
+                  </div>
+                </div>
+              )
+            }
+            return <AssistantGroup key={group.id} group={group} />
+          })}
 
-          {(continuationInfo) && (
+          {isLoading && !groups.some(g =>
+            g.type === 'assistant' && g.children.some(c => c.kind === 'text' && c.isStreaming)
+          ) && (
             <div className="continuation-indicator">
               <span className="continuation-spinner" />
               {continuationInfo && <span className="continuation-text">续写中 {continuationInfo.current}/{continuationInfo.max}</span>}
-            </div>
-          )}
-
-          {(!continuationInfo && isLoading && !messages.some((m) => m.isStreaming) && messages.some((m) => m.role === 'execution')) && (
-            <div className="continuation-indicator">
-              <span className="continuation-spinner" />
             </div>
           )}
 

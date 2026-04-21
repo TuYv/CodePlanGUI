@@ -1,10 +1,11 @@
 # CodePlanGUI 统一工具协议系统 — 设计文档
 
-> **版本**: v2.0
-> **日期**: 2026-04-17
+> **版本**: v3.0
+> **日期**: 2026-04-20
 > **状态**: Draft
+> **前置依赖**: Phase 1（统一事件通道 `onEvent`）已完成；Phase 2（消息分组 `MessageGroup`）已完成
 > **参考**: MiniCode PRD_UNIFIED_TOOL_PROTOCOL.md、claw-code 权限模型调研
-> **变更**: v1.0 → v2.0 合并 protocol-design + architecture，优化 7 项设计问题
+> **变更**: v2.0 → v3.0 适配统一事件通道（`onEvent`）和消息分组（`MessageGroup`）架构
 
 ---
 
@@ -558,7 +559,7 @@ private suspend fun awaitApproval(requestId: String): Boolean {
     }
 }
 
-// Vue 回调时恢复协程
+// 前端通过 window.__bridge.approvalResponse() 回调时恢复协程
 fun onApprovalResponse(requestId: String, decision: String) {
     val cont = pendingApprovals.remove(requestId) ?: return
     val approved = decision == "allow"
@@ -590,10 +591,10 @@ EditFileExecutor / WriteFileExecutor 修改已有文件
   │   计算增删行数
   │
   ├─ 通过 Bridge 发送 diff 审批请求
-  │   事件: file_change_request
-  │   Payload: { requestId, path, diff, stats: { added, removed } }
+  │   调用: notifyFileChangeRequest() → buildEventJS("file_change_request", ...)
+  │   → onEvent("file_change_request", payload) → groupReducer
   │
-  ├─ 协程挂起 awaitApproval()，等待 Vue 回调
+  ├─ 协程挂起 awaitApproval()，等待前端 window.__bridge.fileChangeResponse() 回调
   │
   ├─ 用户拒绝 → ToolResult(ok=false, "User rejected")
   │
@@ -610,7 +611,8 @@ WriteFileExecutor 创建新文件
   ├─ 文件不存在 → 新建文件确认流程
   │
   ├─ 通过 Bridge 发送新建文件确认请求
-  │   事件: file_create_request
+  │   调用: notifyFileCreateRequest() → buildEventJS("file_create_request", ...)
+  │   → onEvent("file_create_request", payload) → groupReducer
   │   Payload: {
   │     requestId,
   │     path,
@@ -619,7 +621,7 @@ WriteFileExecutor 创建新文件
   │     language: 根据扩展名推断的语言标识
   │   }
   │
-  ├─ 协程挂起 awaitApproval()，等待 Vue 回调
+  ├─ 协程挂起 awaitApproval()，等待前端 window.__bridge 回调
   │
   ├─ 用户拒绝 → ToolResult(ok=false, "User rejected")
   │
@@ -628,19 +630,19 @@ WriteFileExecutor 创建新文件
 
 ### 8.4 Bridge 事件定义
 
-#### Kotlin → Vue
+#### Kotlin → 前端（走 `onEvent` 统一通道）
 
-| 事件 | 字段 | 说明 |
-|------|------|------|
+| 事件 type | Payload 字段 | 说明 |
+|-----------|-------------|------|
 | `file_change_request` | requestId, path, diff, stats | 修改已有文件的 diff 审批 |
 | `file_create_request` | requestId, path, size, preview, language | 新建文件的确认 |
 
-#### Vue → Kotlin
+#### 前端 → Kotlin（走 `window.__bridge` 动作方法）
 
-| 事件 | 字段 | 说明 |
-|------|------|------|
-| `file_change_response` | requestId, decision | `"allow"` 或 `"deny"` |
-| `file_create_response` | requestId, decision | `"allow"` 或 `"deny"` |
+| 动作方法 | 参数 | 说明 |
+|----------|------|------|
+| `fileChangeResponse` | requestId, decision | `"allow"` 或 `"deny"` |
+| `fileCreateResponse` | requestId, decision | `"allow"` 或 `"deny"` |
 
 ### 8.5 前端组件
 
@@ -660,56 +662,118 @@ WriteFileExecutor 创建新文件
 
 ## 9. Bridge 事件体系扩展
 
-### 9.1 现有事件（保留）
+> **架构前提**：Phase 1 已将 15 个独立回调统一为单一 `onEvent(type, payload)` 通道（`buildEventJS()` → `onEvent`）。Phase 2 引入 `MessageGroup[]` 替代扁平 `Message[]`，`eventReducer` 升级为 `groupReducer`。本节在此基础上扩展。
 
-| 方向 | 事件 | 说明 |
-|------|------|------|
-| IDE → Vue | `onApprovalRequest` | 命令审批请求 |
-| IDE → Vue | `onExecutionStatus` | 执行状态更新 |
-| Vue → IDE | `approvalResponse` | 用户审批决定 |
+### 9.1 现有事件（保留，走 `onEvent` 通道）
 
-### 9.2 新增事件
+Phase 1 已将以下事件统一到 `onEvent(type, payload)` 通道：
 
-| 方向 | 事件 | 说明 |
-|------|------|------|
-| IDE → Vue | `onFileChangeRequest` | 文件修改 diff 审批请求 |
-| Vue → IDE | `fileChangeResponse` | diff 审批决定 |
-| IDE → Vue | `onFileCreateRequest` | 新建文件确认请求 |
-| Vue → IDE | `fileCreateResponse` | 新建文件确认决定 |
+| 事件 type | Payload | 说明 |
+|-----------|---------|------|
+| `approval_request` | `{requestId, command, description}` | 命令审批请求 |
+| `execution_card` | `{requestId, command, description}` | 执行卡片创建 |
+| `execution_status` | `{requestId, status, result}` | 执行状态更新 |
+| `log` | `{requestId, line, type}` | 执行日志 |
+| `round_end` | `{msgId}` | 工具调用轮次结束（Phase 2 激活） |
+
+### 9.2 新增事件（新增 type，复用 `onEvent` 通道）
+
+新增 2 个 IDE → 前端事件类型，直接在 `groupReducer` 中新增 case 处理：
+
+| 事件 type | Payload | 说明 |
+|-----------|---------|------|
+| `file_change_request` | `{requestId, path, diff, stats: {added, removed}}` | 文件修改 diff 审批请求 |
+| `file_create_request` | `{requestId, path, size, preview, language}` | 新建文件确认请求 |
+
+新增 2 个前端 → IDE 动作方法（挂载到 `window.__bridge` 动作接口）：
+
+| 动作方法 | 参数 | 说明 |
+|----------|------|------|
+| `fileChangeResponse` | `(requestId, decision)` | `"allow"` 或 `"deny"` |
+| `fileCreateResponse` | `(requestId, decision)` | `"allow"` 或 `"deny"` |
 
 ### 9.3 现有事件扩展
 
-**onApprovalRequest** 增加 `toolName` 参数：
+**`approval_request`** 增加 `toolName` 和 `toolInput` 字段：
 
-| 参数 | 现有 | 新增 |
+| 字段 | 现有 | 变更 |
 |------|------|------|
-| `requestId` | ✓ | ✓ |
-| `command` | ✓ | → 改名 `toolInput`（通用化） |
-| `description` | ✓ | ✓ |
-| `toolName` | — | ✓（如 `run_command`、`mcp__xxx`） |
+| `requestId` | ✓ | 不变 |
+| `command` | ✓ | → 改名 `toolInput`（通用化，兼容旧值） |
+| `description` | ✓ | 不变 |
+| `toolName` | — | **新增**（如 `run_command`、`mcp__xxx`） |
 
 前端根据 `toolName` 渲染不同审批 UI：
 - `run_command` → 展示命令 + 描述（现有样式）
+- `edit_file` / `write_file` → 跳过审批弹框（由 `file_change_request` / `file_create_request` 独立处理）
 - 其他工具 → 展示工具名 + 参数摘要
 
 ### 9.4 BridgeHandler.kt 变更
 
+所有新事件均通过 `buildEventJS()` 生成，走统一 `onEvent` 通道：
+
 | 方法 | 变更 |
 |------|------|
-| `notifyApprovalRequest` | 参数增加 `toolName` |
-| `notifyFileChangeRequest` | **新增** |
-| `notifyFileCreateRequest` | **新增** |
-| Bridge JS 模板 | 新增 `onFileChangeRequest` / `fileChangeResponse` / `onFileCreateRequest` / `fileCreateResponse` |
+| `notifyApprovalRequest` | payload 增加 `toolName`、`command` 改名 `toolInput`；内部改为 `flushAndPush(buildEventJS("approval_request", ...))` |
+| `notifyFileChangeRequest` | **新增** — `flushAndPush(buildEventJS("file_change_request", ...))` |
+| `notifyFileCreateRequest` | **新增** — `flushAndPush(buildEventJS("file_create_request", ...))` |
+
+调度策略：
+- `approval_request` / `file_change_request` / `file_create_request` → `flushAndPush`（结构性事件，需先刷空待处理 token）
+- 与 Phase 1 中 `execution_card`、`approval_request` 的调度策略一致
 
 ### 9.5 bridge.d.ts 变更
 
-| 接口方法 | 变更 |
-|----------|------|
-| `onApprovalRequest` | 增加 `toolName` 参数 |
-| `onFileChangeRequest` | **新增** |
-| `fileChangeResponse` | **新增** |
-| `onFileCreateRequest` | **新增** |
-| `fileCreateResponse` | **新增** |
+Bridge 接口保持 `onEvent` + 动作方法结构不变，仅扩展动作方法：
+
+```typescript
+interface Bridge {
+  // 统一事件通道（Kotlin → JS）— 不变
+  onEvent: (type: string, payloadJson: string) => void
+
+  // 动作方法（JS → Kotlin）
+  sendMessage: (text: string, includeContext: boolean) => void
+  approvalResponse: (requestId: string, action: string, addToWhitelist?: boolean) => void
+  fileChangeResponse: (requestId: string, decision: string) => void    // 新增
+  fileCreateResponse: (requestId: string, decision: string) => void    // 新增
+  cancelStream: () => void
+  newChat: () => void
+  openSettings: () => void
+  debugLog: (message: string) => void
+  frontendReady: () => void
+}
+```
+
+### 9.6 前端 groupReducer 扩展
+
+新增事件类型在 `groupReducer`（Phase 2 引入，替代 `eventReducer`）中新增 case：
+
+```typescript
+case "file_change_request":
+  return {
+    ...state,
+    fileChangeReview: {
+      requestId: payload.requestId,
+      path: payload.path,
+      diff: payload.diff,
+      stats: payload.stats,
+    },
+  }
+
+case "file_create_request":
+  return {
+    ...state,
+    fileCreateReview: {
+      requestId: payload.requestId,
+      path: payload.path,
+      size: payload.size,
+      preview: payload.preview,
+      language: payload.language,
+    },
+  }
+```
+
+`approval_request` 的 case 扩展为根据 `toolName` 区分渲染逻辑（现有命令审批 + 通用工具审批）。
 
 ---
 
@@ -814,6 +878,8 @@ MCP Server Trust (Phase 4)
 
 ### 12.1 删除的代码（约 120 行）
 
+> **注意**：Phase 2 已删除 `bridgeNotifiedStart` 集合、延迟 `notifyStart` 逻辑和 `notifyRemoveMessage` hack。以下仅列出统一工具设计额外删除的代码。
+
 | 方法/字段 | 原因 |
 |-----------|------|
 | `runCommandToolDefinition()` | 移到 ToolSpecs.kt 常量 |
@@ -876,15 +942,21 @@ MCP Server Trust (Phase 4)
 | 组件 | 变更 |
 |------|------|
 | `ChatService.kt` | 删除 ~120 行硬编码工具逻辑，替换为 ~15 行 Dispatcher 调用 |
-| `BridgeHandler.kt` | approval_request 增加 toolName；新增 file_change_request / file_create_request 事件 |
-| `bridge.d.ts` | 更新审批类型；新增文件变更和新建文件事件类型 |
+| `BridgeHandler.kt` | `notifyApprovalRequest` payload 增加 `toolName`；新增 `notifyFileChangeRequest` / `notifyFileCreateRequest`，均走 `buildEventJS()` 统一通道 |
+| `bridge.d.ts` | 新增 `fileChangeResponse` / `fileCreateResponse` 动作方法 |
+| `groupReducer.ts` | 新增 `file_change_request` / `file_create_request` case；`approval_request` case 扩展 `toolName` 分支 |
 | `ApprovalDialog.tsx` | 扩展支持多种工具类型的审批展示 |
+| `FileChangeDialog.tsx` | **新增** — unified diff 审批组件 |
+| `FileCreateConfirmDialog.tsx` | **新增** — 新建文件确认组件 |
+| `App.tsx` | 新增 `FileChangeDialog` / `FileCreateConfirmDialog` 渲染 + `window.__bridge` 动作方法调用 |
 
 ---
 
 ## 14. 文件变更清单
 
-### 14.1 新建文件（16 个）
+### 14.1 新建文件（19 个）
+
+**Kotlin 后端（16 个）：**
 
 | 文件 | 说明 |
 |------|------|
@@ -905,15 +977,25 @@ MCP Server Trust (Phase 4)
 | `execution/executors/EditFileExecutor.kt` | 精确替换 + diff 审批 |
 | `execution/executors/WriteFileExecutor.kt` | 整文件写入 + 确认/diff 审批 |
 
+**React 前端（3 个）：**
+
+| 文件 | 说明 |
+|------|------|
+| `components/FileChangeDialog.tsx` | 文件修改 diff 审批组件 |
+| `components/FileCreateConfirmDialog.tsx` | 新建文件确认组件 |
+| `types/tool-review.d.ts` | 文件审批相关类型定义 |
+
 ### 14.2 修改文件
 
 | 文件 | 变更 |
 |------|------|
 | `ChatService.kt` | 删除硬编码工具逻辑，改用 ToolCallDispatcher |
 | `ExecutionResult.kt` | 新增 `toToolResult()` 转换方法 |
-| `BridgeHandler.kt` | 审批请求增加 toolName；新增 4 个 Bridge 事件 |
-| `bridge.d.ts` | 更新审批类型；新增文件变更/新建文件类型 |
-| `ApprovalDialog.tsx` | 扩展支持多工具类型审批 |
+| `BridgeHandler.kt` | `notifyApprovalRequest` payload 扩展；新增 `notifyFileChangeRequest` / `notifyFileCreateRequest`（走 `buildEventJS` 统一通道）；新增 `fileChangeResponse` / `fileCreateResponse` 动作注入 |
+| `bridge.d.ts` | 新增 `fileChangeResponse` / `fileCreateResponse` 动作方法；更新 `approval_request` payload 类型 |
+| `groupReducer.ts` | 新增 `file_change_request` / `file_create_request` case；`approval_request` case 扩展 `toolName` 分支 |
+| `ApprovalDialog.tsx` | 扩展支持多工具类型审批（根据 `toolName` 切换 UI） |
+| `App.tsx` | 新增 `FileChangeDialog` / `FileCreateConfirmDialog` 渲染；注入 `fileChangeResponse` / `fileCreateResponse` 回调 |
 | `SettingsState` + Settings UI | 新增 permissionMode 字段和 UI |
 
 ### 14.3 不动文件
@@ -922,11 +1004,16 @@ MCP Server Trust (Phase 4)
 |------|------|
 | `CommandExecutionService.kt` | BashExecutor 和 GrepExecutor 包装它，不改内部 |
 | `ToolCallAccumulator.kt` | SSE 解析层不变 |
-| `ExecutionCard.tsx` | 展示逻辑通用，无需修改 |
+| `ExecutionCard.tsx` | 展示逻辑通用，无需修改（Phase 2 已将其归入 `AssistantGroup`） |
+| `useBridge.ts` | Phase 1 已统一为 `onEvent`，无需改动 |
+| `AssistantGroup.tsx` | Phase 2 新增组件，无需改动 |
+| `AssistantMarkdown.tsx` | Phase 2 新增组件，无需改动 |
 
 ---
 
 ## 15. 迁移步骤
+
+> **前置条件**：Phase 1（统一事件通道）和 Phase 2（消息分组）已完成。
 
 | 步骤 | 内容 | 依赖 | 涉及文件 |
 |------|------|------|----------|
@@ -936,8 +1023,9 @@ MCP Server Trust (Phase 4)
 | **Step 4** | 写入类执行器 + 审批机制 | Step 2 | EditFileExecutor、WriteFileExecutor、FileChangeReview、FileWriteLock |
 | **Step 5** | ToolCallDispatcher | Step 3, 4 | ToolCallDispatcher |
 | **Step 6** | ChatService 重构 | Step 5 | ChatService.kt（重构） |
-| **Step 7** | Bridge + Settings + 前端扩展 | Step 5 | BridgeHandler、bridge.d.ts、SettingsState、ApprovalDialog、FileChangeDialog、FileCreateConfirmDialog |
-| **Step 8** | 测试 & 清理 | Step 7 | 测试文件、删除废弃代码 |
+| **Step 7** | Bridge 事件扩展（`buildEventJS` + 动作注入） | Step 5 | BridgeHandler、bridge.d.ts |
+| **Step 8** | 前端扩展（groupReducer + 审批组件 + Settings） | Step 7 | groupReducer、ApprovalDialog、FileChangeDialog、FileCreateConfirmDialog、App.tsx、SettingsState |
+| **Step 9** | 测试 & 清理 | Step 8 | 测试文件、删除废弃代码 |
 
 每个步骤完成后可独立验证。
 
@@ -983,7 +1071,19 @@ MCP Server Trust (Phase 4)
 
 ---
 
-## 附录 A：v1.0 → v2.0 变更摘要
+## 附录 A：变更摘要
+
+### v2.0 → v3.0（适配统一事件通道 + 消息分组）
+
+| # | 变更 | 原因 |
+|---|------|------|
+| 1 | Bridge 事件体系（第 9 节）完全重写 | Phase 1 已将 15 个独立回调统一为 `onEvent(type, payload)` 通道，新增事件走 `buildEventJS()` 生成，不再注册独立回调 |
+| 2 | `bridge.d.ts` 变更从"新增回调接口"改为"新增动作方法" | Bridge 接口只有 `onEvent` + 动作方法，新事件仅新增 payload 类型定义，新审批响通过新增动作方法 |
+| 3 | 新增第 9.6 节"前端 groupReducer 扩展" | Phase 2 用 `groupReducer` 替代 `eventReducer`，新事件需在 reducer 中新增 case |
+| 4 | 文件变更清单（第 14 节）增加前端组件和 reducer | Phase 2 引入 `AssistantGroup`、`groupReducer` 等新文件，需在清单中反映 |
+| 5 | 迁移步骤（第 15 节）拆分 Bridge 扩展和前端扩展为独立步骤 | Bridge 事件扩展（`buildEventJS`）和前端组件开发（groupReducer + 审批弹框）可独立验证 |
+
+### v1.0 → v2.0（合并文档 + 优化设计）
 
 | # | 变更 | 原因 |
 |---|------|------|

@@ -79,11 +79,6 @@ class ChatService(private val project: Project) : Disposable {
     private val pendingApprovals = ConcurrentHashMap<String, CompletableFuture<Boolean>>()
     private val pendingApprovalCommands = ConcurrentHashMap<String, String>()
 
-<<<<<<< Updated upstream
-    // NOTE: bridgeNotifiedStart removed in Phase 2 — notifyStart is now sent
-    // unconditionally at the start of each streaming round, and round_end replaces
-    // the old remove_message hack for discarding intermediate tokens.
-=======
     // Unified tool system (new)
     private val toolRegistry = ToolRegistry(this)
     private val fileChangeReview = FileChangeReview()
@@ -98,7 +93,6 @@ class ChatService(private val project: Project) : Disposable {
     // When tools are enabled, notifyStart is deferred until the final response round
     // so ExecutionCards appear before the assistant bubble
     private val bridgeNotifiedStart = mutableSetOf<String>()
->>>>>>> Stashed changes
 
     fun attachBridge(handler: BridgeHandler) {
         bridgeHandler = handler
@@ -563,11 +557,6 @@ $selection
                 },
                 onFinishReason = { reason ->
                     if (toolsEnabled && reason == "tool_calls" && activeMessageId == msgId) {
-<<<<<<< Updated upstream
-                        // Phase 2: tell the frontend to discard intermediate tokens from
-                        // this round, keeping only execution cards.
-                        bridgeHandler?.notifyRoundEnd(msgId)
-=======
                         val isUnified = PluginSettings.getInstance().getState().unifiedToolsEnabled
                         if (isUnified) {
                             // Unified path: create the assistant bubble for tool steps only.
@@ -587,7 +576,6 @@ $selection
                                 bridgeNotifiedStart.remove(msgId)
                             }
                         }
->>>>>>> Stashed changes
                         val capturedBuffer = responseBuffer
                         scope.launch { handleToolCallComplete(msgId, capturedBuffer) }
                     }
@@ -836,11 +824,8 @@ $selection
         pendingApprovals.values.forEach { it.complete(false) }
         pendingApprovals.clear()
         pendingApprovalCommands.clear()
-<<<<<<< Updated upstream
-=======
         bridgeNotifiedStart.clear()
         toolRegistry.dispose()
->>>>>>> Stashed changes
         scope.cancel()
     }
 

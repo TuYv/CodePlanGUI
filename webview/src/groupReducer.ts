@@ -25,6 +25,8 @@ export interface GroupState {
   approvalRequestId: string
   approvalCommand: string
   approvalDescription: string
+  approvalToolName: string
+  fileChangeAutos: Array<{ path: string; added: number; removed: number }>
   continuationInfo: { current: number; max: number } | null
   currentRoundTextIndex: number | null
 }
@@ -156,6 +158,7 @@ export function groupReducer(state: GroupState, type: string, payload: any): Gro
         approvalRequestId: payload.requestId,
         approvalCommand: payload.command,
         approvalDescription: payload.description,
+        approvalToolName: payload.toolName || '',
         approvalOpen: true,
       }
     }

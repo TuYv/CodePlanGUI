@@ -135,11 +135,11 @@ class ToolCallDispatcher(
         for (batch in batches) {
             if (batch.isConcurrencySafe && batch.entries.size > 1) {
                 // Concurrent batch
-                var hasBashError = false
+                val hasBashError = java.util.concurrent.atomic.AtomicBoolean(false)
                 val batchResults = coroutineScope {
                     batch.entries.map { (index, call) ->
                         async {
-                            if (hasBashError && isBashCommand(call.name)) {
+                            if (hasBashError.get() && isBashCommand(call.name)) {
                                 index to (call to ToolResult(
                                     ok = false,
                                     output = "Skipped: previous bash command in batch failed"
@@ -147,7 +147,7 @@ class ToolCallDispatcher(
                             } else {
                                 val result = dispatch(call.name, call.arguments, msgId, bridgeHandler)
                                 if (!result.ok && isBashCommand(call.name)) {
-                                    hasBashError = true
+                                    hasBashError.set(true)
                                 }
                                 index to (call to result)
                             }
@@ -357,8 +357,9 @@ class ToolCallDispatcher(
 
     private fun checkDenyRulesEarly(command: String): String? {
         val cmd = command.lowercase()
-        // Path traversal
-        if (command.contains("../") || command.contains("..\\")) return "Path traversal detected"
+        // Path traversal (case-insensitive, handle URL encoding)
+        if (cmd.contains("../") || cmd.contains("..\\") ||
+            cmd.contains("..%2f") || cmd.contains("..%5c")) return "Path traversal detected"
         // Dangerous delete
         if (Regex("""rm\s+(-\w*\s*)*(-r|--recursive).*\s+(/|~)""", RegexOption.IGNORE_CASE).containsMatchIn(cmd))
             return "Dangerous delete command detected"

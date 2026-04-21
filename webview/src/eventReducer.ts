@@ -213,7 +213,7 @@ export function eventReducer(state: AppState, type: string, payload: any): AppSt
                     status: payload.status ? 'completed' as const : 'failed' as const,
                     output: payload.output,
                     durationMs: payload.durationMs,
-                    diffStats: payload.diffStats ? JSON.parse(payload.diffStats) : undefined,
+                    diffStats: payload.diffStats,
                   }
                 : step
             )

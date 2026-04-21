@@ -43,11 +43,7 @@ export default function App() {
   const [includeContext, setIncludeContext] = useState(true)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
-<<<<<<< Updated upstream
-  const { groups, isLoading, error, status, themeMode, approvalOpen, approvalRequestId, approvalCommand, approvalDescription, continuationInfo } = appState
-=======
-  const { messages, isLoading, error, status, themeMode, approvalOpen, approvalRequestId, approvalCommand, approvalDescription, approvalToolName, continuationInfo } = appState
->>>>>>> Stashed changes
+  const { groups, isLoading, error, status, themeMode, approvalOpen, approvalRequestId, approvalCommand, approvalDescription, approvalToolName, continuationInfo } = appState
 
   // Apply theme class to document root
   useEffect(() => {

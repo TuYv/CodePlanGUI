@@ -8,7 +8,14 @@ import com.github.codeplangui.api.TruncationDecision
 import com.github.codeplangui.api.TruncationHandler
 import com.github.codeplangui.execution.CommandExecutionService
 import com.github.codeplangui.execution.ExecutionResult
+import com.github.codeplangui.execution.FileChangeReview
+import com.github.codeplangui.execution.FileWriteLock
+import com.github.codeplangui.execution.PendingToolCall
 import com.github.codeplangui.execution.ShellPlatform
+import com.github.codeplangui.execution.ToolCallDispatcher
+import com.github.codeplangui.execution.ToolRegistry
+import com.github.codeplangui.execution.ToolSpecs
+import com.github.codeplangui.execution.hooks.ToolExecutionLogger
 import com.github.codeplangui.model.ChatSession
 import com.github.codeplangui.model.Message
 import com.github.codeplangui.model.MessageRole
@@ -71,6 +78,16 @@ class ChatService(private val project: Project) : Disposable {
     // Approval gate: suspended coroutines wait on these futures
     private val pendingApprovals = ConcurrentHashMap<String, CompletableFuture<Boolean>>()
     private val pendingApprovalCommands = ConcurrentHashMap<String, String>()
+
+    // Unified tool system (new)
+    private val toolRegistry = ToolRegistry(this)
+    private val fileChangeReview = FileChangeReview()
+    private val fileWriteLock = FileWriteLock()
+    private val dispatcher = ToolCallDispatcher(toolRegistry, fileChangeReview, fileWriteLock, project).also {
+        it.addHook(ToolExecutionLogger())
+        // Register built-in tools
+        toolRegistry.addTools(ToolSpecs().allSpecs())
+    }
 
     // Tracks which msgIds have had notifyStart sent to the frontend
     // When tools are enabled, notifyStart is deferred until the final response round
@@ -138,6 +155,7 @@ class ChatService(private val project: Project) : Disposable {
 
         val settingsState = settings.getState()
         val commandExecutionEnabled = settingsState.commandExecutionEnabled
+        val unifiedTools = settingsState.unifiedToolsEnabled && commandExecutionEnabled
 
         val contextSnapshot = if (includeContext && settingsState.contextInjectionEnabled) {
             capturePromptContextSnapshot()
@@ -175,15 +193,12 @@ class ChatService(private val project: Project) : Disposable {
             temperature = settingsState.chatTemperature,
             maxTokens = settingsState.chatMaxTokens,
             stream = true,
-            tools = if (commandExecutionEnabled) listOf(runCommandToolDefinition()) else null
+            tools = if (unifiedTools) dispatcher.buildToolsParam()
+                     else if (commandExecutionEnabled) listOf(runCommandToolDefinition())
+                     else null
         )
 
-        // When tools are enabled, defer notifyStart so ExecutionCards appear before the assistant bubble.
-        // The bubble is created only on the final response round (no tool calls).
-        if (!commandExecutionEnabled) {
-            bridgeHandler?.notifyStart(msgId)
-            bridgeNotifiedStart.add(msgId)
-        }
+        // notifyStart is now sent unconditionally in startStreamingRound() (Phase 2).
         startStreamingRound(msgId, request, toolsEnabled = commandExecutionEnabled)
     }
 
@@ -194,7 +209,6 @@ class ChatService(private val project: Project) : Disposable {
         val msgId = activeMessageId
         activeMessageId = null
         if (wasStreaming && msgId != null) {
-            bridgeNotifiedStart.remove(msgId)
             publishStatus()
             bridgeHandler?.notifyEnd(msgId)
         }
@@ -206,11 +220,11 @@ class ChatService(private val project: Project) : Disposable {
         activeMessageId = null
         truncationHandler.reset()
         resetToolCallState()
-        bridgeNotifiedStart.clear()
         session = ChatSession()
         pendingApprovals.values.forEach { it.complete(false) }
         pendingApprovals.clear()
         pendingApprovalCommands.clear()
+        dispatcher.resetSession()
         sessionStore.clearSession()
         contextFileCallback?.invoke("")
         publishStatus()
@@ -243,6 +257,17 @@ class ChatService(private val project: Project) : Disposable {
             "[CodePlanGUI Approval] received frontend decision " +
                 "requestId=$requestId decision=$decision addToWhitelist=$addToWhitelist hasPending=${pendingApprovals.containsKey(requestId)}"
         )
+
+        // Try unified dispatcher first (coroutine-based)
+        if (PluginSettings.getInstance().getState().unifiedToolsEnabled) {
+            if (addToWhitelist && decision == "allow") {
+                // Note: unified dispatcher doesn't use command-level whitelist the same way.
+                // For now, also handle via legacy path for backwards compatibility.
+            }
+            dispatcher.onApprovalResponse(requestId, decision)
+        }
+
+        // Legacy path (CompletableFuture-based)
         if (addToWhitelist && decision == "allow") {
             val command = pendingApprovalCommands[requestId]
             if (command != null) {
@@ -269,6 +294,81 @@ class ChatService(private val project: Project) : Disposable {
     }
 
     private suspend fun handleToolCallComplete(msgId: String, responseBuffer: StringBuilder) {
+        val settingsState = PluginSettings.getInstance().getState()
+
+        if (settingsState.unifiedToolsEnabled) {
+            // New unified dispatcher path
+            handleToolCallCompleteUnified(msgId, responseBuffer)
+        } else {
+            // Legacy path
+            handleToolCallCompleteLegacy(msgId, responseBuffer)
+        }
+    }
+
+    private suspend fun handleToolCallCompleteUnified(msgId: String, responseBuffer: StringBuilder) {
+        val accumulatedToolCalls = toolCallAccumulator.snapshot()
+        if (accumulatedToolCalls.isEmpty()) {
+            abortStream(msgId, "AI sent a tool_calls finish_reason but no tool call deltas were captured")
+            return
+        }
+
+        val pendingCalls = accumulatedToolCalls.mapNotNull { accumulated ->
+            val toolCallId = accumulated.id ?: run {
+                abortStream(msgId, "AI sent a tool_calls finish_reason but tool call index ${accumulated.index} had no id")
+                return
+            }
+            PendingToolCall(
+                id = toolCallId,
+                name = accumulated.functionName ?: ShellPlatform.current().toolName(),
+                arguments = accumulated.argumentsJson,
+                index = accumulated.index
+            )
+        }
+
+        dispatcher.resetRound()
+        val results = dispatcher.dispatchAll(pendingCalls, msgId, bridgeHandler ?: return)
+
+        // Build tool results for API
+        val toolCallRecords = results.map { (call, result) ->
+            ToolCallRecord(
+                id = call.id,
+                functionName = call.name,
+                arguments = call.arguments
+            )
+        }
+        val toolResultContents = results.map { (_, result) ->
+            result.output
+        }
+
+        // Add assistant message with tool_calls
+        session.add(Message(
+            role = MessageRole.ASSISTANT,
+            content = responseBuffer.toString(),
+            id = UUID.randomUUID().toString(),
+            seq = session.nextSeq(),
+            toolCalls = toolCallRecords
+        ))
+
+        // Add tool result messages
+        results.forEach { (call, result) ->
+            session.add(Message(
+                role = MessageRole.TOOL,
+                content = result.output,
+                toolCallId = call.id,
+                id = UUID.randomUUID().toString(),
+                seq = session.nextSeq()
+            ))
+        }
+        persistSession()
+
+        resetToolCallState()
+        responseBuffer.clear()
+        // Re-activate so startStreamingRound's onToken/onEnd callbacks work
+        activeMessageId = msgId
+        sendMessageInternal(msgId)
+    }
+
+    private suspend fun handleToolCallCompleteLegacy(msgId: String, responseBuffer: StringBuilder) {
         val preparedToolCalls = prepareToolCallsForExecution(msgId) ?: return
         val state = PluginSettings.getInstance().getState()
         val completedToolCalls = mutableListOf<CompletedToolCall>()
@@ -324,10 +424,9 @@ class ChatService(private val project: Project) : Disposable {
         resetToolCallState()
         responseBuffer.clear()
 
-        // Do NOT create the assistant bubble here — the next round might produce
-        // more tool calls.  The bubble is created lazily in onToken and removed
-        // in onFinishReason("tool_calls") if tool calls follow, ensuring all
-        // execution cards appear before the final streaming bubble.
+        // The next round's startStreamingRound() will send notifyStart which
+        // the frontend's groupReducer handles by reusing the existing assistant
+        // group (still streaming). Intermediate tokens are discarded via round_end.
         sendMessageInternal(msgId)
     }
 
@@ -335,17 +434,21 @@ class ChatService(private val project: Project) : Disposable {
         val pluginSettings = PluginSettings.getInstance()
         val provider = pluginSettings.getActiveProvider() ?: return
         val apiKey = ApiKeyStore.load(provider.id) ?: return
-        val commandExecutionEnabled = pluginSettings.getState().commandExecutionEnabled
+        val settingsState = pluginSettings.getState()
+        val commandExecutionEnabled = settingsState.commandExecutionEnabled
+        val unifiedTools = settingsState.unifiedToolsEnabled && commandExecutionEnabled
         logger.info("[CodePlanGUI Approval] starting follow-up model round msgId=$msgId")
 
         val request = client.buildRequest(
             config = provider,
             apiKey = apiKey,
             messages = session.getApiMessages(),
-            temperature = pluginSettings.getState().chatTemperature,
-            maxTokens = pluginSettings.getState().chatMaxTokens,
+            temperature = settingsState.chatTemperature,
+            maxTokens = settingsState.chatMaxTokens,
             stream = true,
-            tools = if (commandExecutionEnabled) listOf(runCommandToolDefinition()) else null
+            tools = if (unifiedTools) dispatcher.buildToolsParam()
+                     else if (commandExecutionEnabled) listOf(runCommandToolDefinition())
+                     else null
         )
 
         startStreamingRound(msgId, request, toolsEnabled = commandExecutionEnabled)
@@ -399,7 +502,6 @@ $selection
         activeStream?.cancel()
         activeStream = null
         activeMessageId = null
-        bridgeNotifiedStart.remove(msgId)
         resetToolCallState()
         publishStatus()
         bridgeHandler?.notifyStructuredError(BridgeErrorPayload(
@@ -409,6 +511,10 @@ $selection
     }
 
     private fun startStreamingRound(msgId: String, request: okhttp3.Request, toolsEnabled: Boolean) {
+        // Phase 2: notifyStart sent unconditionally — the frontend's groupReducer
+        // handles continuation rounds by reusing the existing assistant group.
+        bridgeHandler?.notifyStart(msgId)
+
         val responseBuffer = StringBuilder()
         scope.launch {
             val stream = client.streamChat(
@@ -416,27 +522,11 @@ $selection
                 onToken = { token ->
                     if (activeMessageId == msgId) {
                         responseBuffer.append(token)
-                        // Lazily create the assistant bubble on first token.
-                        // If this round ends up producing tool_calls, onFinishReason will
-                        // remove the bubble so execution cards stay in front.
-                        if (msgId !in bridgeNotifiedStart) {
-                            bridgeHandler?.notifyStart(msgId)
-                            bridgeNotifiedStart.add(msgId)
-                        }
                         bridgeHandler?.notifyToken(token)
                     }
                 },
                 onEnd = {
                     if (activeMessageId == msgId && !truncationHandler.isPendingContinuation) {
-                        // If the bubble hasn't been started yet (no tool calls in this round),
-                        // start it now and flush the buffered content.
-                        if (msgId !in bridgeNotifiedStart) {
-                            bridgeHandler?.notifyStart(msgId)
-                            bridgeNotifiedStart.add(msgId)
-                            if (responseBuffer.isNotEmpty()) {
-                                bridgeHandler?.notifyToken(responseBuffer.toString())
-                            }
-                        }
                         logger.info("[CodePlanGUI Approval] model round completed msgId=$msgId")
                         session.add(Message(
                             role = MessageRole.ASSISTANT,
@@ -447,7 +537,6 @@ $selection
                         persistSession()
                         activeStream = null
                         activeMessageId = null
-                        bridgeNotifiedStart.remove(msgId)
                         publishStatus()
                         bridgeHandler?.notifyEnd(msgId)
                     }
@@ -457,7 +546,6 @@ $selection
                         logger.warn("[CodePlanGUI Approval] model round failed msgId=$msgId error=$message")
                         activeStream = null
                         activeMessageId = null
-                        bridgeNotifiedStart.remove(msgId)
                         publishStatus()
                         bridgeHandler?.notifyStructuredError(classifyStreamError(message))
                     }
@@ -469,13 +557,24 @@ $selection
                 },
                 onFinishReason = { reason ->
                     if (toolsEnabled && reason == "tool_calls" && activeMessageId == msgId) {
-                        // Remove the assistant bubble if it was already created by the
-                        // lazy init in onToken.  This guarantees that execution cards
-                        // (pushed during handleToolCallComplete) always appear before
-                        // the final assistant bubble.
-                        if (msgId in bridgeNotifiedStart) {
-                            bridgeHandler?.notifyRemoveMessage(msgId)
-                            bridgeNotifiedStart.remove(msgId)
+                        val isUnified = PluginSettings.getInstance().getState().unifiedToolsEnabled
+                        if (isUnified) {
+                            // Unified path: create the assistant bubble for tool steps only.
+                            // Do NOT flush round-1 text — the formal response streams after tools complete.
+                            if (msgId !in bridgeNotifiedStart) {
+                                bridgeHandler?.notifyStart(msgId)
+                                bridgeNotifiedStart.add(msgId)
+                            }
+                            // Clear activeMessageId to prevent onEnd from finalizing this message
+                            // — the follow-up round will continue appending to it.
+                            activeMessageId = null
+                        } else {
+                            // Legacy path: remove the assistant bubble so execution cards appear before
+                            // the final assistant bubble.
+                            if (msgId in bridgeNotifiedStart) {
+                                bridgeHandler?.notifyRemoveMessage(msgId)
+                                bridgeNotifiedStart.remove(msgId)
+                            }
                         }
                         val capturedBuffer = responseBuffer
                         scope.launch { handleToolCallComplete(msgId, capturedBuffer) }
@@ -726,6 +825,7 @@ $selection
         pendingApprovals.clear()
         pendingApprovalCommands.clear()
         bridgeNotifiedStart.clear()
+        toolRegistry.dispose()
         scope.cancel()
     }
 

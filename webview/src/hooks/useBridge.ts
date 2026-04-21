@@ -1,55 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
-import { BridgeError, BridgeStatus } from '../types/bridge'
 
-interface BridgeCallbacks {
-  onStart: (msgId: string) => void
-  onToken: (token: string) => void
-  onEnd: (msgId: string) => void
-  onError: (message: string) => void
-  onStructuredError: (error: BridgeError) => void
-  onStatus: (status: BridgeStatus) => void
-  onContextFile: (fileName: string) => void
-  onTheme: (theme: 'dark' | 'light') => void
-  onApprovalRequest: (requestId: string, command: string, description: string) => void
-  onExecutionCard: (requestId: string, command: string, description: string) => void
-  onExecutionStatus: (requestId: string, status: string, result: string) => void
-  onLog: (msgId: string, logLine: string, type: string) => void
-  onRestoreMessages: (messages: string) => void
-  onContinuation: (current: number, max: number) => void
-  onRemoveMessage: (msgId: string) => void
-}
+type EventHandler = (type: string, payload: any) => void
 
-export function useBridge(callbacks: BridgeCallbacks) {
+export function useBridge(onEvent: EventHandler): boolean {
   const [bridgeReady, setBridgeReady] = useState(() => window.__bridge?.isReady === true)
   const frontendReadySentRef = useRef(false)
-  const callbacksRef = useRef(callbacks)
-
-  useEffect(() => {
-    callbacksRef.current = callbacks
-    if (!window.__bridge) {
-      return
-    }
-
-    window.__bridge.onStart = callbacks.onStart
-    window.__bridge.onToken = callbacks.onToken
-    window.__bridge.onEnd = callbacks.onEnd
-    window.__bridge.onError = callbacks.onError
-    window.__bridge.onStructuredError = callbacks.onStructuredError
-    window.__bridge.onStatus = callbacks.onStatus
-    window.__bridge.onContextFile = callbacks.onContextFile
-    window.__bridge.onTheme = callbacks.onTheme
-    window.__bridge.onApprovalRequest = callbacks.onApprovalRequest
-    window.__bridge.onExecutionCard = callbacks.onExecutionCard
-    window.__bridge.onExecutionStatus = callbacks.onExecutionStatus
-    window.__bridge.onLog = callbacks.onLog
-    window.__bridge.onRestoreMessages = callbacks.onRestoreMessages
-    window.__bridge.onContinuation = callbacks.onContinuation
-    window.__bridge.onRemoveMessage = callbacks.onRemoveMessage
-  }, [callbacks])
+  const onEventRef = useRef(onEvent)
+  onEventRef.current = onEvent
 
   useEffect(() => {
     const setup = () => {
-      const currentCallbacks = callbacksRef.current
       if (!window.__bridge) {
         window.__bridge = {
           isReady: false,
@@ -59,39 +19,17 @@ export function useBridge(callbacks: BridgeCallbacks) {
           cancelStream: () => {},
           frontendReady: () => {},
           debugLog: () => {},
-          onStart: currentCallbacks.onStart,
-          onToken: currentCallbacks.onToken,
-          onEnd: currentCallbacks.onEnd,
-          onError: currentCallbacks.onError,
-          onStructuredError: currentCallbacks.onStructuredError,
-          onStatus: currentCallbacks.onStatus,
-          onContextFile: currentCallbacks.onContextFile,
-          onTheme: currentCallbacks.onTheme,
+          onEvent: (_type: string, _payloadJson: string) => {},
           approvalResponse: () => {},
-          onApprovalRequest: currentCallbacks.onApprovalRequest,
-          onExecutionCard: currentCallbacks.onExecutionCard,
-          onExecutionStatus: currentCallbacks.onExecutionStatus,
-          onLog: currentCallbacks.onLog,
-          onRestoreMessages: currentCallbacks.onRestoreMessages,
-          onContinuation: currentCallbacks.onContinuation,
-          onRemoveMessage: currentCallbacks.onRemoveMessage,
+        } as any
+      }
+      window.__bridge.onEvent = (type: string, payloadJson: string) => {
+        try {
+          const payload = JSON.parse(payloadJson)
+          onEventRef.current(type, payload)
+        } catch (e) {
+          console.warn(`[CodePlanGUI] Failed to parse event payload: type=${type}`, e)
         }
-      } else {
-        window.__bridge.onStart = currentCallbacks.onStart
-        window.__bridge.onToken = currentCallbacks.onToken
-        window.__bridge.onEnd = currentCallbacks.onEnd
-        window.__bridge.onError = currentCallbacks.onError
-        window.__bridge.onStructuredError = currentCallbacks.onStructuredError
-        window.__bridge.onStatus = currentCallbacks.onStatus
-        window.__bridge.onContextFile = currentCallbacks.onContextFile
-        window.__bridge.onTheme = currentCallbacks.onTheme
-        window.__bridge.onApprovalRequest = currentCallbacks.onApprovalRequest
-        window.__bridge.onExecutionCard = currentCallbacks.onExecutionCard
-        window.__bridge.onExecutionStatus = currentCallbacks.onExecutionStatus
-        window.__bridge.onLog = currentCallbacks.onLog
-        window.__bridge.onRestoreMessages = currentCallbacks.onRestoreMessages
-        window.__bridge.onContinuation = currentCallbacks.onContinuation
-        window.__bridge.onRemoveMessage = currentCallbacks.onRemoveMessage
       }
 
       const isReady = window.__bridge.isReady === true

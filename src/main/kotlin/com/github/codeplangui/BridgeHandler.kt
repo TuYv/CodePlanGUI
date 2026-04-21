@@ -7,6 +7,9 @@ import com.intellij.ui.jcef.JBCefJSQuery
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObjectBuilder
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import org.cef.browser.CefBrowser
 import org.cef.browser.CefFrame
 import org.cef.handler.CefLoadHandlerAdapter
@@ -190,21 +193,7 @@ class BridgeHandler(
                             debugLog: function(text) {
                                 ${sendQuery.inject("""JSON.stringify({type:'debugLog',text:text})""")}
                             },
-                            onStart: function(msgId) {},
-                            onToken: function(token) {},
-                            onEnd: function(msgId) {},
-                            onError: function(message) {},
-                            onStatus: function(status) {},
-                            onContextFile: function(fileName) {},
-                            onTheme: function(theme) {},
-                            onApprovalRequest: function(requestId, command, description) {},
-                            onExecutionCard: function(requestId, command, description) {},
-                            onLog: function(msgId, logLine, type) {},
-                            onExecutionStatus: function(requestId, status, result) {},
-                            onRestoreMessages: function(messages) {},
-                            onStructuredError: function(error) {},
-                            onContinuation: function(current, max) {},
-                            onRemoveMessage: function(msgId) {}
+                            onEvent: function(type, payloadJson) {}
                         };
                         document.dispatchEvent(new Event('bridge_ready'));
                     """.trimIndent()
@@ -233,62 +222,80 @@ class BridgeHandler(
         }, browser.cefBrowser)
     }
 
-    fun notifyStart(msgId: String) = flushAndPush("window.__bridge.onStart(${msgId.quoted()})")
+    fun notifyStart(msgId: String) =
+        flushAndPush(buildEventJS("start") { put("msgId", JsonPrimitive(msgId)) })
 
-    fun notifyToken(token: String) = enqueueJS("window.__bridge.onToken(${json.encodeToString(token)})")
+    fun notifyToken(token: String) =
+        enqueueJS(buildEventJS("token") { put("text", JsonPrimitive(token)) })
 
-    fun notifyEnd(msgId: String) = flushAndPush("window.__bridge.onEnd(${msgId.quoted()})")
+    fun notifyEnd(msgId: String) =
+        flushAndPush(buildEventJS("end") { put("msgId", JsonPrimitive(msgId)) })
 
-    fun notifyError(message: String) = flushAndPush("window.__bridge.onError(${json.encodeToString(message)})")
+    fun notifyError(message: String) =
+        flushAndPush(buildEventJS("error") { put("message", JsonPrimitive(message)) })
 
     fun notifyStructuredError(error: BridgeErrorPayload) =
-        flushAndPush("window.__bridge.onStructuredError(${json.encodeToString(error)})")
+        flushAndPush(buildEventJS("structured_error") {
+            put("type", JsonPrimitive(error.type))
+            put("message", JsonPrimitive(error.message))
+            error.action?.let { put("action", JsonPrimitive(it)) }
+        })
 
     fun notifyStatus(status: BridgeStatusPayload) =
-        flushAndPush("window.__bridge.onStatus(${json.encodeToString(status)})")
+        flushAndPush(buildEventJS("status") {
+            put("providerName", JsonPrimitive(status.providerName))
+            put("model", JsonPrimitive(status.model))
+            put("connectionState", JsonPrimitive(status.connectionState))
+        })
 
     fun notifyContextFile(fileName: String) =
-        pushJS("window.__bridge.onContextFile(${json.encodeToString(fileName)})")
+        pushJS(buildEventJS("context_file") { put("fileName", JsonPrimitive(fileName)) })
 
     fun notifyTheme(theme: String) =
-        pushJS("window.__bridge.onTheme(${json.encodeToString(theme)})")
+        pushJS(buildEventJS("theme") { put("mode", JsonPrimitive(theme)) })
 
     fun notifyLog(msgId: String, logLine: String, type: String) =
-        enqueueJS(
-            "window.__bridge.onLog(" +
-            "${json.encodeToString(msgId)}," +
-            "${json.encodeToString(logLine)}," +
-            "${json.encodeToString(type)})"
-        )
+        enqueueJS(buildEventJS("log") {
+            put("requestId", JsonPrimitive(msgId))
+            put("line", JsonPrimitive(logLine))
+            put("type", JsonPrimitive(type))
+        })
 
     fun notifyExecutionCard(requestId: String, command: String, description: String) =
-        flushAndPush(
-            "window.__bridge.onExecutionCard(" +
-            "${json.encodeToString(requestId)}," +
-            "${json.encodeToString(command)}," +
-            "${json.encodeToString(description)})"
-        )
+        flushAndPush(buildEventJS("execution_card") {
+            put("requestId", JsonPrimitive(requestId))
+            put("command", JsonPrimitive(command))
+            put("description", JsonPrimitive(description))
+        })
 
     fun notifyApprovalRequest(requestId: String, command: String, description: String) =
-        flushAndPush(
-            "window.__bridge.onApprovalRequest(" +
-            "${json.encodeToString(requestId)}," +
-            "${json.encodeToString(command)}," +
-            "${json.encodeToString(description)})"
-        ).also {
+        flushAndPush(buildEventJS("approval_request") {
+            put("requestId", JsonPrimitive(requestId))
+            put("command", JsonPrimitive(command))
+            put("toolInput", JsonPrimitive(command))
+            put("description", JsonPrimitive(description))
+        }).also {
             logger.info(
                 "[CodePlanGUI Bridge] ide->frontend approvalRequest " +
                     "requestId=$requestId command=${command.summarizeForLog()} description=${description.summarizeForLog()}"
             )
         }
 
+    fun notifyFileChangeAuto(path: String, added: Int, removed: Int) =
+        flushAndPush(buildEventJS("file_change_auto") {
+            put("path", JsonPrimitive(path))
+            put("stats", buildJsonObject {
+                put("added", JsonPrimitive(added))
+                put("removed", JsonPrimitive(removed))
+            })
+        })
+
     fun notifyExecutionStatus(requestId: String, status: String, resultJson: String) =
-        flushAndPush(
-            "window.__bridge.onExecutionStatus(" +
-            "${json.encodeToString(requestId)}," +
-            "${json.encodeToString(status)}," +
-            "${json.encodeToString(resultJson)})"
-        ).also {
+        flushAndPush(buildEventJS("execution_status") {
+            put("requestId", JsonPrimitive(requestId))
+            put("status", JsonPrimitive(status))
+            put("result", JsonPrimitive(resultJson))
+        }).also {
             logger.info(
                 "[CodePlanGUI Bridge] ide->frontend executionStatus " +
                     "requestId=$requestId status=$status result=${resultJson.summarizeForLog(240)}"
@@ -296,13 +303,48 @@ class BridgeHandler(
         }
 
     fun notifyRestoreMessages(messages: String) =
-        flushAndPush("window.__bridge.onRestoreMessages(${json.encodeToString(messages)})")
+        flushAndPush(buildEventJS("restore_messages") { put("messages", JsonPrimitive(messages)) })
 
     fun notifyContinuation(current: Int, max: Int) =
-        pushJS("window.__bridge.onContinuation($current, $max)")
+        pushJS(buildEventJS("continuation") {
+            put("current", JsonPrimitive(current))
+            put("max", JsonPrimitive(max))
+        })
 
     fun notifyRemoveMessage(msgId: String) =
-        flushAndPush("window.__bridge.onRemoveMessage(${msgId.quoted()})")
+        flushAndPush(buildEventJS("remove_message") { put("msgId", JsonPrimitive(msgId)) })
+
+    fun notifyRoundEnd(msgId: String) =
+        flushAndPush(buildEventJS("round_end") { put("msgId", JsonPrimitive(msgId)) })
+
+    fun notifyToolStepStart(msgId: String, requestId: String, toolName: String, summary: String) =
+        flushAndPush(buildEventJS("tool_step_start") {
+            put("msgId", JsonPrimitive(msgId))
+            put("requestId", JsonPrimitive(requestId))
+            put("toolName", JsonPrimitive(toolName))
+            put("summary", JsonPrimitive(summary))
+        })
+
+    fun notifyToolStepEnd(msgId: String, requestId: String, status: Boolean, output: String, durationMs: Long, diffStats: String? = null) =
+        flushAndPush(buildEventJS("tool_step_end") {
+            put("msgId", JsonPrimitive(msgId))
+            put("requestId", JsonPrimitive(requestId))
+            put("status", JsonPrimitive(status))
+            put("output", JsonPrimitive(output))
+            put("durationMs", JsonPrimitive(durationMs))
+            if (diffStats != null) put("diffStats", JsonPrimitive(diffStats))
+        })
+
+    /**
+     * Build a JS call that dispatches a unified event through `window.__bridge.onEvent(type, payloadJson)`.
+     * The payload is built using kotlinx.serialization's `buildJsonObject` for safe JSON encoding.
+     * Only generates the JS string — the caller decides the dispatch strategy (enqueueJS / flushAndPush / pushJS).
+     */
+    private fun buildEventJS(type: String, builderAction: JsonObjectBuilder.() -> Unit): String {
+        val obj = buildJsonObject(builderAction)
+        val payloadStr = obj.toString()
+        return "window.__bridge.onEvent(${type.quoted()}, ${json.encodeToString(payloadStr)})"
+    }
 
     /**
      * Enqueue a streamable JS call (token / log line) for batch delivery.
@@ -338,9 +380,13 @@ class BridgeHandler(
         if (flushPending.compareAndSet(false, true)) {
             flushTimer.schedule(object : TimerTask() {
                 override fun run() {
-                    flushPendingBuffer()
+                    val hasMore: Boolean
+                    synchronized(flushLock) {
+                        flushPendingBuffer()
+                        hasMore = pendingJs.isNotEmpty()
+                    }
                     flushPending.set(false)
-                    if (pendingJs.isNotEmpty()) {
+                    if (hasMore) {
                         scheduleFlush()
                     }
                 }
@@ -353,15 +399,17 @@ class BridgeHandler(
      * Called from the flush timer thread or from [flushAndPush].
      */
     internal fun flushPendingBuffer() {
+        val batch: List<String>
         synchronized(flushLock) {
-            val batch = mutableListOf<String>()
-            while (true) {
-                val item = pendingJs.poll() ?: break
-                batch.add(item)
+            batch = buildList {
+                while (true) {
+                    val item = pendingJs.poll() ?: break
+                    add(item)
+                }
             }
-            if (batch.isNotEmpty()) {
-                executeJS(batch.joinToString(";"))
-            }
+        }
+        if (batch.isNotEmpty()) {
+            executeJS(batch.joinToString(";"))
         }
     }
 

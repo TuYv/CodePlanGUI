@@ -2,41 +2,48 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { BorderOutlined, SendOutlined } from '@ant-design/icons'
 import { Button, ConfigProvider, Switch, Tooltip, Typography, theme as antdTheme } from 'antd'
 import { v4 as uuidv4 } from 'uuid'
+import { AssistantGroup } from './components/AssistantGroup'
 import { ApprovalDialog } from './components/ApprovalDialog'
 import { ErrorBanner } from './components/ErrorBanner'
-import { Message, MessageBubble } from './components/MessageBubble'
 import { ProviderBar } from './components/ProviderBar'
-import type { ExecutionCardData, ExecutionStatus, LogEntry } from './components/ExecutionCard'
 import { getComposerReadiness } from './composerState'
 import { getContextToggleMeta } from './contextState'
-import { parseExecutionResultPayload, stringifyExecutionResultPayload } from './executionStatus'
+import { stringifyExecutionResultPayload } from './executionStatus'
+import { GroupState, groupReducer } from './groupReducer'
 import { useBridge } from './hooks/useBridge'
 import { prepareSendPayload } from './sendState'
-import { applyBridgeStatus, applyContextFile } from './statusState'
-import type { BridgeError } from './types/bridge'
 import { BridgeStatus } from './types/bridge'
 import './App.css'
 
-export default function App() {
-  const [messages, setMessages] = useState<Message[]>([])
-  const [inputText, setInputText] = useState('')
-  const isComposingRef = useRef(false)
-  const [isLoading, setIsLoading] = useState(false)
-  const [includeContext, setIncludeContext] = useState(true)
-  const [error, setError] = useState<BridgeError | null>(null)
-  const [status, setStatus] = useState<BridgeStatus>({
+const initialAppState: GroupState = {
+  groups: [],
+  isLoading: false,
+  error: null,
+  status: {
     providerName: '',
     model: '',
     connectionState: 'unconfigured',
     contextFile: '',
-  })
-  const [themeMode, setThemeMode] = useState<'dark' | 'light'>('dark')
+  },
+  themeMode: 'dark',
+  approvalOpen: false,
+  approvalRequestId: '',
+  approvalCommand: '',
+  approvalDescription: '',
+  approvalToolName: '',
+  fileChangeAutos: [],
+  continuationInfo: null,
+  currentRoundTextIndex: null,
+}
+
+export default function App() {
+  const [appState, setAppState] = useState<GroupState>(initialAppState)
+  const [inputText, setInputText] = useState('')
+  const isComposingRef = useRef(false)
+  const [includeContext, setIncludeContext] = useState(true)
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  const [approvalOpen, setApprovalOpen] = useState(false)
-  const [approvalRequestId, setApprovalRequestId] = useState('')
-  const [approvalCommand, setApprovalCommand] = useState('')
-  const [approvalDescription, setApprovalDescription] = useState('')
-  const [continuationInfo, setContinuationInfo] = useState<{ current: number; max: number } | null>(null)
+
+  const { groups, isLoading, error, status, themeMode, approvalOpen, approvalRequestId, approvalCommand, approvalDescription, approvalToolName, continuationInfo } = appState
 
   // Apply theme class to document root
   useEffect(() => {
@@ -50,195 +57,46 @@ export default function App() {
 
   useEffect(() => {
     scrollToBottom()
-  }, [messages])
-
-  const onStart = useCallback((msgId: string) => {
-    setIsLoading(true)
-    setError(null)
-    setMessages((prev) => [
-      ...prev,
-      { id: msgId, role: 'assistant', content: '', isStreaming: true },
-    ])
-  }, [])
-
-  const onToken = useCallback((token: string) => {
-    setMessages((prev) =>
-      prev.map((message) =>
-        message.isStreaming ? { ...message, content: message.content + token } : message,
-      ),
-    )
-  }, [])
-
-  const onEnd = useCallback((_msgId: string) => {
-    setIsLoading(false)
-    setContinuationInfo(null)
-    setMessages((prev) =>
-      prev.map((message) => (message.isStreaming ? { ...message, isStreaming: false } : message)),
-    )
-  }, [])
-
-  const onError = useCallback((message: string) => {
-    setIsLoading(false)
-    setContinuationInfo(null)
-    setMessages((prev) =>
-      prev.map((item) => (item.isStreaming ? { ...item, isStreaming: false } : item)),
-    )
-    setError({ type: 'runtime', message })
-  }, [])
-
-  const onStructuredError = useCallback((bridgeError: BridgeError) => {
-    setIsLoading(false)
-    setMessages((prev) =>
-      prev.map((item) => (item.isStreaming ? { ...item, isStreaming: false } : item)),
-    )
-    setError(bridgeError)
-  }, [])
-
-  const onContextFile = useCallback((fileName: string) => {
-    setStatus(prev => applyContextFile(prev, fileName))
-  }, [])
-
-  const onTheme = useCallback((newTheme: 'dark' | 'light') => {
-    setThemeMode(newTheme)
-  }, [])
-
-  const onStatus = useCallback((nextStatus: BridgeStatus) => {
-    setStatus(prev => applyBridgeStatus(prev, nextStatus))
-  }, [])
+  }, [groups])
 
   const emitFrontendDebugLog = useCallback((message: string) => {
     window.__bridge?.debugLog(message)
   }, [])
 
-  const onExecutionCard = useCallback((requestId: string, command: string, description: string) => {
-    emitFrontendDebugLog(
-      `[approval-ui] received execution card requestId=${requestId} command=${command} description=${description}`,
-    )
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: requestId,
-        role: 'execution' as const,
-        content: '',
-        execution: { requestId, command, status: 'running' as ExecutionStatus },
-      },
-    ])
-  }, [emitFrontendDebugLog])
+  const handleEvent = useCallback((type: string, payload: any) => {
+    if (type === 'execution_card') {
+      emitFrontendDebugLog(`[approval-ui] received execution card requestId=${payload.requestId} command=${payload.command} description=${payload.description}`)
+    } else if (type === 'approval_request') {
+      emitFrontendDebugLog(`[approval-ui] received approval request requestId=${payload.requestId} command=${payload.command} description=${payload.description}`)
+    } else if (type === 'execution_status') {
+      const rawResult = stringifyExecutionResultPayload(payload.result)
+      emitFrontendDebugLog(`[approval-ui] received execution status requestId=${payload.requestId} status=${payload.status} result=${rawResult.slice(0, 240)}`)
+    }
 
-  const onApprovalRequest = useCallback((requestId: string, command: string, description: string) => {
-    emitFrontendDebugLog(
-      `[approval-ui] received approval request requestId=${requestId} command=${command} description=${description}`,
-    )
-    setApprovalRequestId(requestId)
-    setApprovalCommand(command)
-    setApprovalDescription(description)
-    setApprovalOpen(true)
-    setMessages((prev) =>
-      prev.map((msg) =>
-        msg.id === requestId
-          ? { ...msg, execution: { ...msg.execution!, status: 'waiting' as ExecutionStatus } }
-          : msg
-      )
-    )
-  }, [emitFrontendDebugLog])
-
-  const onExecutionStatus = useCallback((requestId: string, status: string, resultJson: string) => {
-    const rawResult = stringifyExecutionResultPayload(resultJson)
-    emitFrontendDebugLog(
-      `[approval-ui] received execution status requestId=${requestId} status=${status} result=${rawResult.slice(0, 240)}`,
-    )
-    const result = parseExecutionResultPayload(resultJson)
-    setMessages((prev) =>
-      prev.map((msg) =>
-        msg.id === requestId
-          ? { ...msg, execution: { ...msg.execution!, status: status as ExecutionStatus, result } }
-          : msg
-      )
-    )
+    setAppState(prev => groupReducer(prev, type, payload))
   }, [emitFrontendDebugLog])
 
   const handleApprovalAllow = useCallback((addToWhitelist: boolean) => {
     emitFrontendDebugLog(`[approval-ui] modal allow clicked requestId=${approvalRequestId} addToWhitelist=${addToWhitelist}`)
-    setApprovalOpen(false)
+    setAppState(prev => ({ ...prev, approvalOpen: false }))
     window.__bridge?.approvalResponse(approvalRequestId, 'allow', addToWhitelist)
   }, [approvalRequestId, emitFrontendDebugLog])
 
   const handleApprovalDeny = useCallback(() => {
     emitFrontendDebugLog(`[approval-ui] modal deny clicked requestId=${approvalRequestId}`)
-    setApprovalOpen(false)
+    setAppState(prev => ({ ...prev, approvalOpen: false }))
     window.__bridge?.approvalResponse(approvalRequestId, 'deny')
   }, [approvalRequestId, emitFrontendDebugLog])
-
-  const onRestoreMessages = useCallback((messagesJson: string) => {
-    try {
-      const restored = JSON.parse(messagesJson) as Array<{ id: string; role: string; content: string }>
-      setMessages(restored.flatMap((message) => {
-        if (message.role !== 'user' && message.role !== 'assistant') {
-          return []
-        }
-        if (message.role === 'assistant' && message.content.trim().length === 0) {
-          return []
-        }
-        return [{
-          id: message.id,
-          role: message.role,
-          content: message.content,
-          isStreaming: false,
-        }]
-      }))
-    } catch {
-      // ignore malformed restore data
-    }
-  }, [])
-
-  const onLog = useCallback((requestId: string, logLine: string, type: string) => {
-    setMessages((prev) =>
-      prev.map((msg) =>
-        msg.id === requestId
-          ? {
-              ...msg,
-              execution: {
-                ...msg.execution!,
-                logs: [...(msg.execution?.logs || []), { text: logLine, type: type as LogEntry['type'] }],
-              },
-            }
-          : msg
-      )
-    )
-  }, [])
-
-  const onContinuation = useCallback((current: number, max: number) => {
-    setContinuationInfo({ current, max })
-  }, [])
-
-  const onRemoveMessage = useCallback((msgId: string) => {
-    setMessages((prev) => prev.filter((m) => m.id !== msgId))
-  }, [])
 
   // Build theme algorithm for Ant Design
   const themeAlgorithm = themeMode === 'dark' ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm
 
-  const bridgeReady = useBridge({
-    onStart,
-    onToken,
-    onEnd,
-    onError,
-    onStructuredError,
-    onStatus,
-    onContextFile,
-    onTheme,
-    onApprovalRequest,
-    onExecutionCard,
-    onExecutionStatus,
-    onLog,
-    onRestoreMessages,
-    onContinuation,
-    onRemoveMessage,
-  })
+  const bridgeReady = useBridge(handleEvent)
+
   // Clear stale errors when the bridge reconnects (e.g., after webview reload)
   useEffect(() => {
     if (bridgeReady) {
-      setError(null)
+      setAppState(prev => ({ ...prev, error: null }))
     }
   }, [bridgeReady])
 
@@ -253,7 +111,7 @@ export default function App() {
   const handleSend = () => {
     if (!composerReadiness.canSend) {
       if (composerReadiness.reason && composerReadiness.text) {
-        setError({ type: 'runtime', message: composerReadiness.reason! })
+        setAppState(prev => ({ ...prev, error: { type: 'runtime' as const, message: composerReadiness.reason! } }))
       }
       return
     }
@@ -262,10 +120,11 @@ export default function App() {
     if (!payload) return
 
     const userMsgId = uuidv4()
-    setMessages((prev) => [...prev, { id: userMsgId, role: 'user', content: payload.text }])
+    setAppState(prev => ({
+      ...prev,
+      groups: [...prev.groups, { type: 'human' as const, id: userMsgId, message: { id: userMsgId, content: payload.text } }],
+    }))
     setInputText('')
-    // loading + error are set in onStart (source of truth), which fires when the backend
-    // begins streaming. This also handles non-handleSend entry points like "Ask AI".
     window.__bridge?.sendMessage(payload.text, includeContext)
   }
 
@@ -277,9 +136,13 @@ export default function App() {
   }
 
   const handleNewChat = () => {
-    setMessages([])
-    setError(null)
-    setIsLoading(false)
+    setAppState(prev => ({
+      ...prev,
+      groups: [],
+      error: null,
+      isLoading: false,
+      currentRoundTextIndex: null,
+    }))
     window.__bridge?.newChat()
   }
 
@@ -333,10 +196,10 @@ export default function App() {
           bridgeReady={bridgeReady}
         />
 
-        {error && <ErrorBanner error={error} onClose={() => setError(null)} />}
+        {error && <ErrorBanner error={error} onClose={() => setAppState(prev => ({ ...prev, error: null }))} />}
 
         <div className="messages-area">
-          {messages.length === 0 && (
+          {groups.length === 0 && (
             <div className="empty-state">
               <div className="empty-card">
                 <div className="empty-icon">✦</div>
@@ -357,20 +220,25 @@ export default function App() {
             </div>
           )}
 
-          {messages.map((message) => (
-            <MessageBubble key={message.id} message={message} />
-          ))}
+          {groups.map(group => {
+            if (group.type === 'human') {
+              return (
+                <div key={group.id} className="message-row message-row-user">
+                  <div className="message-bubble message-bubble-user">
+                    <Typography.Text>{group.message.content}</Typography.Text>
+                  </div>
+                </div>
+              )
+            }
+            return <AssistantGroup key={group.id} group={group} />
+          })}
 
-          {(continuationInfo) && (
+          {isLoading && !groups.some(g =>
+            g.type === 'assistant' && g.children.some(c => c.kind === 'text' && c.isStreaming)
+          ) && (
             <div className="continuation-indicator">
               <span className="continuation-spinner" />
               {continuationInfo && <span className="continuation-text">续写中 {continuationInfo.current}/{continuationInfo.max}</span>}
-            </div>
-          )}
-
-          {(!continuationInfo && isLoading && !messages.some((m) => m.isStreaming) && messages.some((m) => m.role === 'execution')) && (
-            <div className="continuation-indicator">
-              <span className="continuation-spinner" />
             </div>
           )}
 

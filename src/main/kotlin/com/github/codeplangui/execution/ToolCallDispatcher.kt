@@ -2,8 +2,13 @@ package com.github.codeplangui.execution
 
 import com.github.codeplangui.BridgeHandler
 import com.github.codeplangui.execution.executors.BashExecutor
+import com.github.codeplangui.execution.review.ChangeReviewStrategy
+import com.github.codeplangui.execution.review.EditorInlineReview
 import com.github.codeplangui.settings.PluginSettings
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.vfs.LocalFileSystem
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -28,8 +33,8 @@ import kotlin.math.min
 
 /**
  * Unified tool dispatcher. Owns the complete dispatch pipeline:
- * lookup → parse → dynamic permission → deny_rules → allow_rules →
- * session mode → approval → execution → output truncation.
+ * lookup -> parse -> dynamic permission -> deny_rules -> allow_rules ->
+ * session mode -> approval -> execution -> review -> write -> output truncation.
  */
 class ToolCallDispatcher(
     private val registry: ToolRegistry,
@@ -40,6 +45,9 @@ class ToolCallDispatcher(
     private val logger = Logger.getInstance(ToolCallDispatcher::class.java)
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
+    // Review strategy — selected based on settings
+    private val reviewStrategy: ChangeReviewStrategy
+
     // Approval suspension
     private val pendingApprovals = ConcurrentHashMap<String, CancellableContinuation<Boolean>>()
 
@@ -49,6 +57,18 @@ class ToolCallDispatcher(
     // Rate limiting
     private var roundToolCallCount = 0
     private val consecutiveCalls = mutableMapOf<String, Int>()
+
+    init {
+        val settings = PluginSettings.getInstance().getState()
+        reviewStrategy = when (settings.reviewMode) {
+            "dialog" -> com.github.codeplangui.execution.review.DialogReview()
+            else -> EditorInlineReview(project)
+        }
+        // Sync existing session trust state
+        if (fileChangeReview.sessionFileWriteTrusted) {
+            reviewStrategy.sessionTrusted = true
+        }
+    }
 
     companion object {
         const val MAX_TOOL_OUTPUT_BYTES = 50 * 1024 // 50KB
@@ -70,6 +90,7 @@ class ToolCallDispatcher(
     /** Reset per-session state (new chat). */
     fun resetSession() {
         fileChangeReview.resetSessionTrust()
+        reviewStrategy.resetSessionTrust()
         roundToolCallCount = 0
         consecutiveCalls.clear()
         cancelAllPendingApprovals()
@@ -186,10 +207,6 @@ class ToolCallDispatcher(
 
         // 1. Build context
         val settings = PluginSettings.getInstance().getState()
-        val project = (registry as? ToolRegistry)?.let {
-            // Get project from registry — we need it from context
-            null // Will be resolved from ToolContext construction in dispatch
-        }
 
         // 2. Parse arguments
         val input: JsonObject = try {
@@ -257,8 +274,15 @@ class ToolCallDispatcher(
 
         // 8. Execute (if not intercepted) with timing
         val startTime = System.currentTimeMillis()
-        val finalResult = intercepted ?: runWithFileLock(spec, input, toolName)
+        val rawResult = intercepted ?: runWithFileLock(spec, input, toolName)
         val durationMs = System.currentTimeMillis() - startTime
+
+        // 8.5 File change review (pendingReview handling)
+        val finalResult = if (rawResult.pendingReview != null) {
+            handlePendingReview(rawResult, requestId = UUID.randomUUID().toString(), msgId, stepRequestId, bridgeHandler, durationMs)
+        } else {
+            rawResult
+        }
 
         // 9. Output truncation
         val truncatedResult = truncateOutput(finalResult, msgId)
@@ -281,6 +305,99 @@ class ToolCallDispatcher(
         return truncatedResult
     }
 
+    /**
+     * Handle pending file change review: get user approval, then write file + run post-edit.
+     */
+    private suspend fun handlePendingReview(
+        result: ToolResult,
+        requestId: String,
+        msgId: String,
+        stepRequestId: String,
+        bridgeHandler: BridgeHandler?,
+        durationMs: Long
+    ): ToolResult {
+        val review = result.pendingReview!!
+
+        val approved = if (review.isNewFile) {
+            reviewStrategy.reviewNewFile(
+                project, requestId, review.path,
+                review.newContentForCreate ?: ""
+            )
+        } else {
+            reviewStrategy.reviewFileChange(
+                project, requestId, review.path,
+                review.originalContent, review.newContent
+            )
+        }
+
+        // Sync trust state back to FileChangeReview
+        if (reviewStrategy.sessionTrusted && !fileChangeReview.sessionFileWriteTrusted) {
+            fileChangeReview.setSessionTrusted()
+        }
+
+        if (!approved) {
+            bridgeHandler?.notifyToolStepEnd(msgId, stepRequestId, false, "User rejected changes", durationMs)
+            return ToolResult(ok = false, output = "User rejected changes")
+        }
+
+        // Approved: write the file
+        val writeOk = writeFileAfterApproval(review)
+        if (!writeOk) {
+            return ToolResult(ok = false, output = "Failed to write file: ${review.path}")
+        }
+
+        // Run post-edit pipeline
+        val postEditResult = runPostEditPipeline(review.path)
+
+        val lineCount = review.newContent.lines().size
+        val oldLines = review.originalContent.lines().size
+        val diffLines = Math.abs(lineCount - oldLines)
+        val changeType = if (lineCount > oldLines) "+$diffLines" else "-$diffLines"
+
+        val output = buildString {
+            if (review.isNewFile) {
+                append("File created: ${review.path} ($lineCount lines)")
+            } else {
+                append("File edited successfully: ${review.path} ($changeType lines)")
+            }
+            if (postEditResult != null) {
+                append("\n\n")
+                append(postEditResult)
+            }
+        }
+        return ToolResult(ok = true, output = output)
+    }
+
+    private fun writeFileAfterApproval(review: FileChangeReviewData): Boolean {
+        if (review.isNewFile) {
+            val file = File(review.path)
+            file.parentFile?.mkdirs()
+        }
+        return try {
+            ApplicationManager.getApplication().invokeAndWait {
+                WriteCommandAction.runWriteCommandAction(project) {
+                    val file = File(review.path)
+                    file.writeText(review.newContent)
+                    val vf = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(file)
+                    vf?.refresh(false, false)
+                }
+            }
+            true
+        } catch (e: Exception) {
+            logger.warn("Failed to write file after approval: ${review.path}", e)
+            false
+        }
+    }
+
+    private fun runPostEditPipeline(path: String): String? {
+        return try {
+            val vf = LocalFileSystem.getInstance().findFileByIoFile(File(path)) ?: return null
+            PostEditPipeline(project).runAfterWriteSync(vf)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun buildTargetSummary(toolName: String, input: JsonObject): String {
         return when (toolName) {
             "read_file" -> input["path"]?.jsonPrimitive?.contentOrNull ?: toolName
@@ -298,8 +415,6 @@ class ToolCallDispatcher(
 
     private fun extractDiffStats(toolName: String, input: JsonObject, result: ToolResult): String? {
         if (toolName != "edit_file" && toolName != "write_file") return null
-        // Extract diff stats from result output if available
-        // For now, return null — will be populated when PostEditPipeline is integrated
         return null
     }
 

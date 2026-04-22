@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, memo } from 'react'
 import { CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, RightOutlined, DownOutlined } from '@ant-design/icons'
-import type { ToolStepInfo } from '../eventReducer'
+import type { ToolStepInfo } from '../groupReducer'
 import { ToolStepRow } from './ToolStepRow'
 
 interface ToolStepsBarProps {

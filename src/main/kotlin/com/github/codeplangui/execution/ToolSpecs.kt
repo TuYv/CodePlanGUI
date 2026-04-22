@@ -14,13 +14,12 @@ import kotlinx.serialization.json.JsonObject
 class ToolSpecs {
 
     private val bashExecutor = BashExecutor()
-    private val fileChangeReview = FileChangeReview()
 
     val readFileExecutor = ReadFileExecutor()
     val listFilesExecutor = ListFilesExecutor()
     val grepFilesExecutor = GrepFilesExecutor()
-    val editFileExecutor = EditFileExecutor(fileChangeReview)
-    val writeFileExecutor = WriteFileExecutor(fileChangeReview)
+    val editFileExecutor = EditFileExecutor()
+    val writeFileExecutor = WriteFileExecutor()
 
     fun allSpecs(): List<ToolSpec> = listOf(
         runCommandSpec(),

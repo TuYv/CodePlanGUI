@@ -1,6 +1,5 @@
-package com.github.codeplangui.execution
+package com.github.codeplangui.execution.review
 
-import com.github.codeplangui.settings.SettingsState
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
@@ -8,48 +7,23 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 
 /**
- * Manages file change review via IDE-native dialogs.
- * Supports session-level trust mode to reduce approval fatigue.
- *
- * @deprecated Replaced by ChangeReviewStrategy + DialogReview/EditorInlineReview.
- *   Kept for backward compatibility during migration — session trust state is synced.
+ * Fallback strategy: uses Messages.showYesNoDialog with a simple diff summary.
+ * Extracted from the original FileChangeReview, behavior unchanged.
  */
-@Deprecated("Use ChangeReviewStrategy implementations instead", ReplaceWith("DialogReview"))
-class FileChangeReview {
+class DialogReview : ChangeReviewStrategy {
 
-    @Volatile
-    var sessionFileWriteTrusted: Boolean = false
-        private set
+    override var sessionTrusted: Boolean = false
 
-    fun resetSessionTrust() {
-        sessionFileWriteTrusted = false
-    }
-
-    fun setSessionTrusted() {
-        sessionFileWriteTrusted = true
-    }
-
-    /**
-     * Review a file modification. Returns true if the change is approved.
-     * In trust mode, skips the dialog and returns true directly.
-     *
-     * First version: uses simple Yes/No confirmation dialog.
-     * Future: IntelliJ DiffDialog integration.
-     */
-    fun reviewFileChange(
-        project: Project,
-        path: String,
-        oldContent: String,
-        newContent: String,
-        settings: SettingsState
+    override suspend fun reviewFileChange(
+        project: Project, requestId: String, path: String,
+        originalContent: String, newContent: String
     ): Boolean {
-        if (sessionFileWriteTrusted) return true
+        if (sessionTrusted) return true
 
         val future = CompletableFuture<Boolean>()
 
         ApplicationManager.getApplication().invokeAndWait {
-            // Compute simple diff stats
-            val oldLines = oldContent.lines().size
+            val oldLines = originalContent.lines().size
             val newLines = newContent.lines().size
             val added = (newLines - oldLines).coerceAtLeast(0)
             val removed = (oldLines - newLines).coerceAtLeast(0)
@@ -59,10 +33,8 @@ class FileChangeReview {
                 appendLine()
                 appendLine("Lines: +$added / -$removed (was $oldLines, now $newLines)")
                 appendLine()
-                // Show first few changed lines as preview
-                val oldSet = oldContent.lines().toSet()
-                val newLinesList = newContent.lines()
-                val changed = newLinesList.filter { it !in oldSet }.take(5)
+                val oldSet = originalContent.lines().toSet()
+                val changed = newContent.lines().filter { it !in oldSet }.take(5)
                 if (changed.isNotEmpty()) {
                     appendLine("--- New/changed lines (preview) ---")
                     changed.forEach { appendLine(it) }
@@ -70,9 +42,7 @@ class FileChangeReview {
             }
 
             val result = Messages.showYesNoDialog(
-                project,
-                message,
-                "File Change Review: $path",
+                project, message, "File Change Review: $path",
                 Messages.getQuestionIcon()
             )
             future.complete(result == Messages.YES)
@@ -81,17 +51,10 @@ class FileChangeReview {
         return future.get(60, TimeUnit.SECONDS)
     }
 
-    /**
-     * Review a new file creation. Returns true if creation is approved.
-     * In trust mode, skips the dialog and returns true directly.
-     */
-    fun reviewNewFile(
-        project: Project,
-        path: String,
-        content: String,
-        settings: SettingsState
+    override suspend fun reviewNewFile(
+        project: Project, requestId: String, path: String, content: String
     ): Boolean {
-        if (sessionFileWriteTrusted) return true
+        if (sessionTrusted) return true
 
         val future = CompletableFuture<Boolean>()
 
@@ -111,11 +74,8 @@ class FileChangeReview {
             }
 
             val result = Messages.showOkCancelDialog(
-                project,
-                message,
-                "Create New File",
-                "Create", "Cancel",
-                Messages.getQuestionIcon()
+                project, message, "Create New File",
+                "Create", "Cancel", Messages.getQuestionIcon()
             )
             future.complete(result == Messages.OK)
         }

@@ -5,12 +5,23 @@ import { applyBridgeStatus, applyContextFile } from './statusState.js'
 
 // ─── Group types ────────────────────────────────────────────────────
 
+export interface ToolStepInfo {
+  id: string
+  toolName: string
+  targetSummary: string
+  status: 'running' | 'completed' | 'failed'
+  durationMs?: number
+  output?: string
+  diffStats?: { added: number; removed: number }
+  expanded?: boolean
+}
+
 export type AssistantChild =
   | { kind: 'execution'; data: ExecutionCardData }
   | { kind: 'text'; id: string; content: string; isStreaming: boolean }
 
 export type HumanGroup = { type: 'human'; id: string; message: { id: string; content: string } }
-export type AssistantGroup = { type: 'assistant'; id: string; children: AssistantChild[]; isStreaming: boolean }
+export type AssistantGroup = { type: 'assistant'; id: string; children: AssistantChild[]; isStreaming: boolean; toolSteps: ToolStepInfo[] }
 export type MessageGroup = HumanGroup | AssistantGroup
 
 // ─── State ──────────────────────────────────────────────────────────
@@ -63,7 +74,7 @@ function restoreToGroups(flat: Array<{ id: string; role: string; content: string
       if (currentAssistant) { groups.push(currentAssistant); currentAssistant = null }
       groups.push({ type: 'human', id: msg.id, message: { id: msg.id, content: msg.content } })
     } else {
-      if (!currentAssistant) currentAssistant = { type: 'assistant', id: msg.id, children: [], isStreaming: false }
+      if (!currentAssistant) currentAssistant = { type: 'assistant', id: msg.id, children: [], isStreaming: false, toolSteps: [] }
       currentAssistant.children.push({ kind: 'text', id: `text-${msg.id}`, content: msg.content, isStreaming: false })
     }
   }
@@ -85,7 +96,7 @@ export function groupReducer(state: GroupState, type: string, payload: any): Gro
         isLoading: true,
         error: null,
         currentRoundTextIndex: null,
-        groups: [...state.groups, { type: 'assistant', id: payload.msgId, children: [], isStreaming: true }],
+        groups: [...state.groups, { type: 'assistant', id: payload.msgId, children: [], isStreaming: true, toolSteps: [] }],
       }
     }
 
@@ -251,6 +262,36 @@ export function groupReducer(state: GroupState, type: string, payload: any): Gro
 
     case 'theme':
       return { ...state, themeMode: payload.mode }
+
+    case 'tool_step_start':
+      return updateLastAssistant(state, group => ({
+        ...group,
+        toolSteps: [
+          ...group.toolSteps,
+          {
+            id: payload.requestId,
+            toolName: payload.toolName,
+            targetSummary: payload.summary,
+            status: 'running' as const,
+          }
+        ]
+      }))
+
+    case 'tool_step_end':
+      return updateLastAssistant(state, group => ({
+        ...group,
+        toolSteps: group.toolSteps.map(step =>
+          step.id === payload.requestId
+            ? {
+                ...step,
+                status: payload.status ? 'completed' as const : 'failed' as const,
+                output: payload.output,
+                durationMs: payload.durationMs,
+                diffStats: payload.diffStats,
+              }
+            : step
+        )
+      }))
 
     default:
       return state

@@ -38,7 +38,8 @@ data class SettingsState(
     var unifiedToolsEnabled: Boolean = true,
     var permissionMode: String = "WORKSPACE_WRITE",
     var allowSessionFileTrust: Boolean = true,
-    var diffSummaryThreshold: Int = 100
+    var diffSummaryThreshold: Int = 100,
+    var reviewMode: String = "editor_inline"
 )
 
 @State(

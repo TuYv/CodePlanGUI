@@ -20,10 +20,9 @@ import kotlinx.serialization.json.put
 data class BashInput(
     val command: String,
     val description: String? = null,
-    val timeoutSeconds: Int = DEFAULT_TIMEOUT_SECONDS,
+    val timeoutSeconds: Int? = null,
 ) {
     companion object {
-        const val DEFAULT_TIMEOUT_SECONDS = 120
         const val MAX_TIMEOUT_SECONDS = 600
     }
 }
@@ -60,6 +59,8 @@ private fun isDestructiveCommand(command: String): Boolean =
 
 val BashTool: Tool<BashInput, BashOutput> = tool {
     name = "Bash"
+    // Alias the legacy execution/ tool names so the LLM can call either naming scheme.
+    aliases = listOf("run_command", "run_powershell")
     description = """
         Execute a shell command in the project's working directory. Supports piping,
         redirection, and subshells. Output over 20k chars is truncated. Use for git,
@@ -88,10 +89,11 @@ val BashTool: Tool<BashInput, BashOutput> = tool {
     parse { raw: JsonElement -> json.decodeFromJsonElement(BashInput.serializer(), raw) }
 
     validate { input, _ ->
+        val t = input.timeoutSeconds
         when {
             input.command.isBlank() ->
                 ValidationResult.Failed("command must not be blank", errorCode = 1)
-            input.timeoutSeconds !in 1..BashInput.MAX_TIMEOUT_SECONDS ->
+            t != null && t !in 1..BashInput.MAX_TIMEOUT_SECONDS ->
                 ValidationResult.Failed(
                     "timeoutSeconds must be between 1 and ${BashInput.MAX_TIMEOUT_SECONDS}",
                     errorCode = 2,
@@ -128,9 +130,11 @@ val BashTool: Tool<BashInput, BashOutput> = tool {
 
     call { input, ctx, onProgress ->
         val service = CommandExecutionService.getInstance(ctx.project)
+        val effectiveTimeout = (input.timeoutSeconds ?: ctx.commandTimeoutSeconds)
+            .coerceIn(1, BashInput.MAX_TIMEOUT_SECONDS)
         val result = service.executeAsyncWithStream(
             command = input.command,
-            timeoutSeconds = input.timeoutSeconds,
+            timeoutSeconds = effectiveTimeout,
             onOutput = { line, isError ->
                 onProgress(if (isError) Progress.Stderr(line) else Progress.Stdout(line))
             },
@@ -167,7 +171,7 @@ private fun previewFor(input: BashInput, basePath: String): PreviewResult = Prev
     summary = "Run: ${input.command}",
     details = buildString {
         append("Working dir: ").appendLine(basePath)
-        append("Timeout: ").append(input.timeoutSeconds).appendLine("s")
+        append("Timeout: ").append(input.timeoutSeconds ?: "default").appendLine("s")
         input.description?.let { append("Intent: ").appendLine(it) }
     },
     risk = if (isDestructiveCommand(input.command)) PreviewResult.Risk.HIGH else PreviewResult.Risk.MEDIUM,

@@ -268,12 +268,13 @@ class BridgeHandler(
             put("description", JsonPrimitive(description))
         })
 
-    fun notifyApprovalRequest(requestId: String, command: String, description: String) =
+    fun notifyApprovalRequest(requestId: String, command: String, description: String, toolName: String = "") =
         flushAndPush(buildEventJS("approval_request") {
             put("requestId", JsonPrimitive(requestId))
             put("command", JsonPrimitive(command))
             put("toolInput", JsonPrimitive(command))
             put("description", JsonPrimitive(description))
+            put("toolName", JsonPrimitive(toolName))
         }).also {
             logger.info(
                 "[CodePlanGUI Bridge] ide->frontend approvalRequest " +

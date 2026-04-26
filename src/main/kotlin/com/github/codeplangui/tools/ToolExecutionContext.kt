@@ -13,6 +13,8 @@ data class ToolExecutionContext(
     val toolUseId: String,
     val abortJob: Job,
     val permissionContext: ToolPermissionContext = ToolPermissionContext.default(),
+    /** Default timeout for Bash commands when the model omits `timeoutSeconds`. */
+    val commandTimeoutSeconds: Int = 120,
     /**
      * M3: real permission decision callback. Called when `checkPermissions` returns `Ask`.
      * Returns true to allow, false to deny. Default auto-approves so existing callers

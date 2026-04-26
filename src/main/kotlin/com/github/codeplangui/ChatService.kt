@@ -7,6 +7,7 @@ import com.github.codeplangui.api.ToolCallDelta
 import com.github.codeplangui.api.ToolDefinition
 import com.github.codeplangui.api.TruncationDecision
 import com.github.codeplangui.api.TruncationHandler
+import com.github.codeplangui.execution.CommandExecutionService
 import com.github.codeplangui.execution.ShellPlatform
 import com.github.codeplangui.model.ChatSession
 import com.github.codeplangui.model.Message
@@ -18,6 +19,7 @@ import com.github.codeplangui.settings.PluginSettingsConfigurable
 import com.github.codeplangui.storage.SessionStore
 import com.github.codeplangui.tools.Progress
 import com.github.codeplangui.tools.ToolExecutionContext
+import com.github.codeplangui.tools.ToolPermissionContext
 import com.github.codeplangui.tools.ToolResultBlock
 import com.github.codeplangui.tools.ToolUpdate
 import com.github.codeplangui.tools.ToolUseBlock
@@ -72,6 +74,10 @@ class ChatService(private val project: Project) : Disposable {
 
     // Approval gate: suspended coroutines wait on these futures
     private val pendingApprovals = ConcurrentHashMap<String, CompletableFuture<Boolean>>()
+    // Maps requestId → command string so onApprovalResponse can update the whitelist
+    private val pendingApprovalCommands = ConcurrentHashMap<String, String>()
+    // Tracks msgId while tool batch is executing so cancelStream() works during tools
+    @Volatile private var runningToolMsgId: String? = null
 
     // Tracks which msgIds have had notifyStart sent to the frontend
     // When tools are enabled, notifyStart is deferred until the final response round
@@ -184,11 +190,12 @@ class ChatService(private val project: Project) : Disposable {
     }
 
     fun cancelStream() {
-        val wasStreaming = activeMessageId != null
+        val msgId = activeMessageId ?: runningToolMsgId
+        val wasStreaming = msgId != null
         activeStream?.cancel()
         activeStream = null
-        val msgId = activeMessageId
         activeMessageId = null
+        runningToolMsgId = null
         if (wasStreaming && msgId != null) {
             publishStatus()
             bridgeHandler?.notifyEnd(msgId)
@@ -204,6 +211,8 @@ class ChatService(private val project: Project) : Disposable {
         session = ChatSession()
         pendingApprovals.values.forEach { it.complete(false) }
         pendingApprovals.clear()
+        pendingApprovalCommands.clear()
+        runningToolMsgId = null
         sessionStore.clearSession()
         contextFileCallback?.invoke("")
         publishStatus()
@@ -236,6 +245,18 @@ class ChatService(private val project: Project) : Disposable {
             "[CodePlanGUI Approval] received frontend decision " +
                 "requestId=$requestId decision=$decision addToWhitelist=$addToWhitelist hasPending=${pendingApprovals.containsKey(requestId)}"
         )
+        if (addToWhitelist && decision == "allow") {
+            val command = pendingApprovalCommands[requestId]
+            if (command != null) {
+                val baseCommand = CommandExecutionService.extractBaseCommand(command)
+                val whitelist = PluginSettings.getInstance().getState().commandWhitelist
+                if (baseCommand !in whitelist) {
+                    whitelist.add(baseCommand)
+                    logger.info("[CodePlanGUI Approval] added '$baseCommand' to whitelist")
+                }
+            }
+        }
+        pendingApprovalCommands.remove(requestId)
         pendingApprovals[requestId]?.complete(decision == "allow")
     }
 
@@ -257,19 +278,34 @@ class ChatService(private val project: Project) : Disposable {
         }
     }
 
+    private fun buildPermissionContext(): ToolPermissionContext {
+        val state = PluginSettings.getInstance().getState()
+        return ToolPermissionContext(
+            mode = ToolPermissionContext.Mode.DEFAULT,
+            alwaysAllow = state.commandWhitelist.toSet(),
+            alwaysDeny = emptySet(),
+            alwaysAsk = emptySet(),
+            additionalWorkingDirectories = emptySet(),
+        )
+    }
+
     private fun handleToolCallChunk(delta: ToolCallDelta) {
         toolCallAccumulator.append(delta)
     }
 
     private suspend fun handleToolCallComplete(msgId: String, responseBuffer: StringBuilder) {
+        runningToolMsgId = msgId
+
         val accumulatedToolCalls = toolCallAccumulator.snapshot()
         if (accumulatedToolCalls.isEmpty()) {
+            runningToolMsgId = null
             abortStream(msgId, "AI sent a tool_calls finish_reason but no tool call deltas were captured")
             return
         }
 
         val toolUses = accumulatedToolCalls.mapNotNull { accumulated ->
             val toolCallId = accumulated.id ?: run {
+                runningToolMsgId = null
                 abortStream(msgId, "AI sent a tool_calls finish_reason but tool call index ${accumulated.index} had no id")
                 return
             }
@@ -286,14 +322,19 @@ class ChatService(private val project: Project) : Disposable {
         }
 
         val pool = com.github.codeplangui.tools.ToolRegistry.assembleToolPool()
+        val settingsState = PluginSettings.getInstance().getState()
         val ctx = ToolExecutionContext(
             project = project,
             toolUseId = msgId,
             abortJob = scope.coroutineContext[Job]!!,
+            permissionContext = buildPermissionContext(),
+            commandTimeoutSeconds = settingsState.commandTimeoutSeconds,
             onPermissionAsked = { event ->
                 val bridge = bridgeHandler ?: return@ToolExecutionContext false
                 val requestId = event.toolUseId
                 val previewSummary = event.preview?.summary ?: event.reason
+                // Strip "Run: " prefix to store raw command for whitelist persistence
+                pendingApprovalCommands[requestId] = previewSummary.removePrefix("Run: ")
                 bridge.notifyApprovalRequest(requestId, previewSummary, event.reason, event.toolName)
                 val future = CompletableFuture<Boolean>()
                 pendingApprovals[requestId] = future
@@ -365,6 +406,10 @@ class ChatService(private val project: Project) : Disposable {
             ))
         }
         persistSession()
+
+        // Check if cancelled while tools were running
+        if (runningToolMsgId != msgId) return
+        runningToolMsgId = null
 
         resetToolCallState()
         responseBuffer.clear()
@@ -589,6 +634,8 @@ $selection
         activeStream?.cancel()
         pendingApprovals.values.forEach { it.complete(false) }
         pendingApprovals.clear()
+        pendingApprovalCommands.clear()
+        runningToolMsgId = null
         bridgeNotifiedStart.clear()
         scope.cancel()
     }

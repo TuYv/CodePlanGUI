@@ -4,6 +4,7 @@ import { Button, Typography } from 'antd'
 import type { AssistantGroup as AssistantGroupType } from '../groupReducer'
 import { AssistantMarkdown } from './AssistantMarkdown'
 import { ExecutionCard } from './ExecutionCard'
+import { ToolStepsBar } from './ToolStepsBar'
 
 async function copyText(text: string): Promise<boolean> {
   if (navigator.clipboard?.writeText) {
@@ -59,6 +60,9 @@ interface AssistantGroupProps {
 export const AssistantGroup = memo(function AssistantGroup({ group }: AssistantGroupProps) {
   return (
     <div className="assistant-group">
+      {group.toolSteps && group.toolSteps.length > 0 && (
+        <ToolStepsBar steps={group.toolSteps} />
+      )}
       {group.children.map(child => {
         if (child.kind === 'execution') {
           return <ExecutionCard key={child.data.requestId} data={child.data} />

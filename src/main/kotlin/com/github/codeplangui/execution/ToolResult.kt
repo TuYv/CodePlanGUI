@@ -13,7 +13,20 @@ data class ToolResult(
     val backgroundTask: BackgroundTask? = null,
     val truncated: Boolean = false,
     val totalBytes: Int? = null,
-    val outputPath: String? = null
+    val outputPath: String? = null,
+    val pendingReview: FileChangeReviewData? = null
+)
+
+/**
+ * Carries pending file change data from executor to dispatcher.
+ * Dispatcher delegates to ChangeReviewStrategy for approval, then writes.
+ */
+data class FileChangeReviewData(
+    val path: String,
+    val originalContent: String,
+    val newContent: String,
+    val isNewFile: Boolean = false,
+    val newContentForCreate: String? = null
 )
 
 @Serializable

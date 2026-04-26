@@ -1,6 +1,6 @@
 import { memo, useState } from 'react'
 import { CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, RightOutlined, DownOutlined } from '@ant-design/icons'
-import type { ToolStepInfo } from '../eventReducer'
+import type { ToolStepInfo } from '../groupReducer'
 
 const TOOL_ICONS: Record<string, string> = {
   read_file: '\u{1F4D6}',

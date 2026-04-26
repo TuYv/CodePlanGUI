@@ -2,7 +2,10 @@ package com.github.codeplangui.tools
 
 import com.github.codeplangui.tools.bash.BashTool
 import com.github.codeplangui.tools.file.FileEditTool
+import com.github.codeplangui.tools.file.FileListTool
 import com.github.codeplangui.tools.file.FileReadTool
+import com.github.codeplangui.tools.file.FileSearchTool
+import com.github.codeplangui.tools.file.WriteFileTool
 
 /**
  * Central registry of built-in tools and the plumbing that assembles the pool
@@ -31,7 +34,10 @@ object ToolRegistry {
     fun getAllBaseTools(): List<Tool<*, *>> = listOf(
         BashTool,
         FileEditTool,
+        FileListTool,
         FileReadTool,
+        FileSearchTool,
+        WriteFileTool,
     )
 
     /**

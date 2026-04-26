@@ -60,6 +60,8 @@ private fun isDestructiveCommand(command: String): Boolean =
 
 val BashTool: Tool<BashInput, BashOutput> = tool {
     name = "Bash"
+    // Alias the legacy execution/ tool names so the LLM can call either naming scheme.
+    aliases = listOf("run_command", "run_powershell")
     description = """
         Execute a shell command in the project's working directory. Supports piping,
         redirection, and subshells. Output over 20k chars is truncated. Use for git,
